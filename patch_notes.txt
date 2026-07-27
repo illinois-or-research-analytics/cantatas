@@ -1,0 +1,17 @@
+# SASCA-ReSA Patch Notes
+
+## Refactoring and Optimization (main -> hkohli/refactor)
+
+* **Architectural Decoupling**: Split the monolithic `abm.cpp` file into more focused, maintainable modules including `citation_engine.cpp`, `metrics_engine.cpp`, and `neighborhood_search.cpp`.
+* **Data Structure Enhancements**: Upgraded graph traversal mechanisms by transitioning from adjacency maps to adjacency lists (`GetForwardAdjList` / `GetBackwardAdjList`) for significantly faster graph traversals.
+* **Code Reusability & Formatting**: Formatted the codebase, added extensive documentation across headers, and modernized string handling by moving to `std::string_view` for zero-copy parsing.
+* **Build Configuration**: Updated `CMakeLists.txt` and `.gitignore` to reflect the new modular architecture.
+
+* **Cache Efficiency**: Completely restructured `AdjMap` and `NodeAttributes` into flat, contiguous arrays to heavily optimize cache locality during tight simulation loops.
+* **OpenMP Parallelization & SIMD**: Rewrote simulation inner-loops to leverage OpenMP SIMD directives. Hoisted temporary iteration vectors to OpenMP thread-local scratchpads to avoid concurrent allocation overheads.
+* **Memory Management**: Removed six separate dynamic memory allocation structures in the `MakeCitations` workflow.
+* **Mapping Optimizations**: Converted `reverse_continuous_node_mapping` into a contiguous `std::vector` for faster, predictable node lookups.
+
+
+* **Community & Clustering Support**: Integrated a new `community_assignment` config parameter to allow agent nodes to inherit cluster IDs from their generator nodes, alongside a bundled `leiden_clustering.py` script for easy community file generation.
+* **Cluster-Based Citations**: Introduced an optional `theta` threshold parameter. When an agent's assigned community size is at least `theta`, the simulation completely replaces its standard 1-hop neighborhood with targeted intra-cluster citations to simulate tight-knit research communities.
