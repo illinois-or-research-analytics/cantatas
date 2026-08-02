@@ -445,7 +445,7 @@ public:
   Description: Retrieves the number of nodes currently assigned to the given
   cluster.
   */
-  int GetClusterSize(int cluster_id) const;
+  int GetClusterSize(int cluster_id, int current_year = -1) const;
 
 private:
   std::set<int> node_set;

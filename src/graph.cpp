@@ -485,10 +485,19 @@ const std::vector<int> &Graph::GetClusterNodes(int cluster_id) const {
   return empty_cluster;
 }
 
-int Graph::GetClusterSize(int cluster_id) const {
+int Graph::GetClusterSize(int cluster_id, int current_year) const {
   auto it = this->cluster_nodes_map.find(cluster_id);
   if (it != this->cluster_nodes_map.end()) {
-    return it->second.size();
+    if (current_year == -1) {
+      return it->second.size();
+    }
+    int count = 0;
+    for (int node : it->second) {
+      if (this->GetYear(node) < current_year) {
+        count++;
+      }
+    }
+    return count;
   }
   return 0;
 }

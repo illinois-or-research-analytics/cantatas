@@ -697,8 +697,6 @@ bool ABM::ValidateArguments() {
           Log::error);
       return false;
     }
-    this->logger.WriteToLogFile("theta: " + std::to_string(this->theta),
-                                Log::info);
   } else {
     if (this->theta != -42) {
       this->logger.WriteToLogFile(
@@ -1067,14 +1065,15 @@ void ABM::RunSimulationLoop() {
       int cluster_id = this->graph->GetCommunityAssignment(new_node);
 
       if (alpha > 0 && cluster_id >= 0 &&
-          this->graph->GetClusterSize(cluster_id) >= this->theta) {
+          this->graph->GetClusterSize(cluster_id, current_year) >= this->theta) {
         const std::vector<int> &cluster_nodes =
             this->graph->GetClusterNodes(cluster_id);
         std::vector<int> filtered_cluster_nodes;
         filtered_cluster_nodes.reserve(cluster_nodes.size());
         for (int node : cluster_nodes) {
           if (std::find(generator_nodes.begin(), generator_nodes.end(), node) ==
-              generator_nodes.end()) {
+                  generator_nodes.end() &&
+              this->graph->GetYear(node) < current_year) {
             filtered_cluster_nodes.push_back(node);
           }
         }
