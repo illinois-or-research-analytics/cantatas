@@ -1,29 +1,15 @@
-The _Scalable Agent-based Simulator for Citation Analysis SASCA(-ReSA)_ is a scalable agent-based modeling simulator that can begin with a small seed network and simulate an exponential network growth to reach sizes of 100 million nodes and more. Currently, SASCA is implemented in modern C++ and can be run across hundreds of cores.
+The _Community-aware agent-based citation Simulator (CantataS)_ is a network growth model that is built on top of SASCA-ReSA with an additional feature that allows nodes to be cluster-aware. The codebase has also been modularized for user readability and for future improvements.
 
 ## Recent changelogs
+7.0.4: Fixes current year nodes leaking into the alpha intra-cluster citations.
+
 7.0.3: Fixes removal of duplicate edges within cluster.
 
 7.0.2: Fixes alpha value not showing correctly in auxiliary file.
 
 7.0.1: Fixes a memory management issue causing abrupt exit codes.
 
-7.0.0: Allows for cluster based citations.
-
-6.2.8: Adds out-degree safeguarding based on the constant in the header file of abm and the input out-degree bag file.
-
-6.2.7: Fixes a bug with initial author reputation when only one node exists in the final year of the seed set and a brand new author gets assigned to it
-
-6.2.5: Adds support for cartel authors
-
-6.2.4: Fixes file flushing on WriteGraph()
-
-6.2.2: Fixes a bug with number of authors and planted nodes feature where number of authors was not having an effect
-
-6.2.1: functionality did not change but the output nodelist now has initial author reputation and final author reputation
-
-6.2.0: introduces author layer with h-index as author reputation and updated planted nodes structure
-
-6.1.0: introduces author layer and log-based score calculation
+7.0.0: Allows for cluster based citations (CantataS).
 
 
 ## Dependencies
@@ -39,14 +25,14 @@ The _Scalable Agent-based Simulator for Citation Analysis SASCA(-ReSA)_ is a sca
 Run [setup.sh](setup.sh) to locally install [Eigen](https://eigen.tuxfamily.org/index.php?title=Main_Page), [PCG](https://www.pcg-random.org/), [inih](https://github.com/jtilly/inih.git), and [argparse](https://github.com/p-ranav/argparse.git). Alternatively, just ensure that these libraries are discoverable by cmake and adjust the build accordingly.
 
 ## How to build
-SASCA is a standard cmake project. [easy_build_and_compile.sh](easy_build_and_compile.sh) is provided for user convenience.
+CantataS is a standard cmake project. [easy_build_and_compile.sh](easy_build_and_compile.sh) is provided for user convenience.
 
 ### Running in a cluster environment
 Below is the recommended way of building and running a standard cmake project on a cluster environment such as the Illinois Campus Cluster. This will ensure that the code is compiled with the right optimizations for the specific compute node it is assigned.
 ```console
 mkdir build
 cd build
-cmake -DCMAKE_BUILD_TYPE=Release <SASCA git root>
+cmake -DCMAKE_BUILD_TYPE=Release <CantataS git root>
 make
 cd ..
 ./build/bin/abm --config <configuration file>
@@ -57,7 +43,7 @@ rm -r ./build
 Building the project under the Release mode requires no modules to be loaded.
 
 ### Debug mode node on the Illinois Campus Cluster
-Building the project under the Debug mode requires the ASAN libray. This library is not loaded properly on the campus cluster by default. For those using the Illinois Campus Cluster, load any `gcc` module version greater than 11 e.g., `module load gcc/12.4.0`.
+Building the project under the Debug mode requires the ASAN library. This library is not loaded properly on the campus cluster by default. For those using the Illinois Campus Cluster, load any `gcc` module version greater than 11 e.g., `module load gcc/12.4.0`.
 
 ## How to run
 The general command is given below.
@@ -65,8 +51,8 @@ The general command is given below.
 abm --config <Configuration file>
 ```
 
-An example configuration file, shown below, is also provided in the docs folder [Example configuration file](docs/example.ini)
-Brief comments for each flag is listed inside the example configuration file. Detailed explanations for each of the flags are at the end of this section. All flags are required to be present in the configuration file. Unused flags can simply be left empty but the flag itself must still be present.
+An example configuration file, shown below, is also provided in the docs folder [Example configuration file](docs/example.ini).
+Brief comments for each flag are listed inside the example configuration file. Detailed explanations for each of the flags are at the end of this section. All flags are required to be present in the configuration file. Unused flags can simply be left empty but the flag itself must still be present.
 
 
 ```
@@ -84,6 +70,7 @@ start_from_checkpoint=<BOOL> ; boolean value e.g., true or false for whether to 
 
 [Agent]
 alpha=<FLOAT> ; floating point value specifying the alpha for neighborhood
+theta=<INT> ; optional value used to indicate minimum cluster size for intra-cluster citations
 use_alpha=<BOOL> ; boolean value e.g., true or false for whether to use alpha or not
 same_year_citations=<DOUBLE> ; floating point value e.g., 0.12 for 12%
 fully_random_citations=<DOUBLE> ; floating point value e.g., 0.05 for 5%
@@ -143,9 +130,9 @@ In order to do a "single-bin model" run, in which agents cite based on preferent
 ### Individual flags
 #### Environment flags
 - `nodelist`: csv file with (node\_id, publication\_year) on each line. Both headers and their values are required. This is the starting seed network nodelist. When starting from a checkpoint, so when `start_from_checkpoint` is true, then `nodelist` supplied should be the auxiliary information file from the previous run with no modifications.
-- `edgelist`: csv file with (source,target) on each line. This is the starting seed network edgelist. When starting from a checkpoint, so when `start_from_checkpoint` is true, then `edgelist` supplied should be the output file from the previous run with no modifications. Note that the header line for this CSV does not actually matter as long as the first column represents the source node and the second columns repreresns the target node. For example, the header line could be source,target or citing,cited, or u,v or any valid csv row.
-- `recency_table` csv file derived from a real-world network. This file is usually created by taking a real-world citation network and getting the count Y which equals the number of edges that represent a citation across x years. This is encoded as a row in the csv such as x,y for each x. Note that for any simulation, a row for x needs to exist for all x from 1 to last year in the simulation - oldest publication year in the seed node set. Note that the header line for this CSV is required but the string values of the header line is not enforced. The only requirement is that starting from the second line of the csv that there are two comma separated integer values for each line.
-- `out_degree_bag`: csv file derived from a real-world network. This file is usually created by taking real-world citation network and getting the out-degree of each node in the network. This is encoded as a row in the csv such as node\_id,out\_degree for each node in the network. Note that the node\_id column is unused but is useful for keeping track of which real-world publication was used. The headers in this file are not enforced except that two columns are required and that the second column must be integers. The largest out-degree specified in this file must be at most the value specified in the `max\_out\_degree` constant defined the header file for abm. Increasing this constant will increase the memory usage.
+- `edgelist`: csv file with (source,target) on each line. This is the starting seed network edgelist. When starting from a checkpoint, so when `start_from_checkpoint` is true, the `edgelist` supplied should be the output file from the previous run with no modifications. Note that the header line for this CSV does not actually matter as long as the first column represents the source node and the second column represents the target node. For example, the header line could be source,target or citing,cited, or u,v or any valid csv row.
+- `recency_table`: csv file derived from a real-world network. This file is usually created by taking a real-world citation network and getting the count Y which equals the number of edges that represent a citation across x years. This is encoded as a row in the csv such as x,y for each x. Note that for any simulation, a row for x needs to exist for all x from 1 to last year in the simulation - oldest publication year in the seed node set. Note that the header line for this CSV is required but the string values of the header line is not enforced. The only requirement is that starting from the second line of the csv that there are two comma separated integer values for each line.
+- `out_degree_bag`: csv file derived from a real-world network. This file is usually created by taking a real-world citation network and getting the out-degree of each node in the network. This is encoded as a row in the csv such as node\_id,out\_degree for each node in the network. Note that the node\_id column is unused but is useful for keeping track of which real-world publication was used. The headers in this file are not enforced except that two columns are required and that the second column must be integers. The largest out-degree specified in this file must be at most the value specified in the `max\_out\_degree` constant defined the header file for abm. Increasing this constant will increase the memory usage.
 - `growth_rate`: floating point value, e.g., 0.03 for 3%, which serves as the exponent for the exponential growth formula used in determining how many new agents should spawn per cycle of simulation.
 - `num_cycles`: integer value e.g., 30 for a 30-year simulation
 - `recency_bins`: This string is a user supplied comma separated string such that each comma separated value in the string is the start of the bin boundary. For example, a string "1,2,5,10,20" represents a binning for recency such that the first bin contains all publications that are less than 2 year old, meaning 1 <= current year - publication year < 2. It follows that the second bin now are publications that are at least 2 years old but at most 4 years old (2 <= current year - publication year < 5). The last bin is implied to go on until infinity so in this example, the last bin contains all publications that are at least 20 years old (20 <= current\_year - publication year < infinity).
@@ -154,8 +141,8 @@ In order to do a "single-bin model" run, in which agents cite based on preferent
 - `start_from_checkpoint` boolean value e.g., true or false for whether to start from a checkpoint or not. Check notes about `nodelist` and `edgelist` if this flag is set to true.
 
 #### Agent flags
-- `alpha` floating point value specifying the alpha for neighborhood. This value for alpha determines the proportion of citations that are made to the 1-hop nodes of the generator node relative to the total number of citations that the agent will make to the generator node's neighborhood. It can be left to be -1 for a random model or a constant value such as 0.5.
-- `use_alpha` boolean value e.g., true or false for whether to use alpha or not. When alpha i
+- `alpha`: floating point value specifying the alpha for neighborhood. This value for alpha determines the proportion of citations that are made to the 1-hop nodes of the generator node relative to the total number of citations that the agent will make to the generator node's neighborhood. It can be left as -1 for a random model or a constant value such as 0.5.
+- `use_alpha`: boolean value e.g., true or false for whether to use alpha or not.
 - `theta`: optional integer threshold value. If a valid `community_assignment` file is provided, this parameter defines the minimum cluster size required for an agent to replace its standard 1-hop neighborhood with targeted intra-cluster citations. If the agent's assigned cluster is smaller than `theta`, the simulation reverts to standard 1-hop citations.
 - `same_year_citations`: floating point value e.g., 0.12 for 12%. This value determines the proportion of new agents in a given year that cite another agent from the same year.
 - `fully_random_citations`: floating point value e.g., 0.05 for 5%. This value determines the proportion of assigned out-degree that goes towards citing any node from the graph in a fully random manner.
@@ -165,20 +152,20 @@ In order to do a "single-bin model" run, in which agents cite based on preferent
 - `author_reputation_weight`: floating point value e.g., 0.33. This value can be left -1 for agents with random weights or a constant value for static agents.
 - `fitness_value_min`: minimum possible integer fitness value for each agent.
 - `fitness_value_max`: maximum possible integer fitness value for each agent.
-- `fitness_lag_duration_min`: minimum lag duration in years (inclusive). The fitness decay model in SASCA-ReSA works as follows. For the first `x` number of years, an agent is dormant and has the lowest possible fitness value. Afterwards, the agent immediately gains its full fitness value and retains it for `y` number of years. Finally, the fitness power for the agent decays according to a decaying power-law curve. `x` and `y` here are drawn from uniform distributions built by the lag duration min/max values and peak duration min/max values, respectively.
+- `fitness_lag_duration_min`: minimum lag duration in years (inclusive). The fitness decay model in CantataS works as follows. For the first `x` number of years, an agent is dormant and has the lowest possible fitness value. Afterwards, the agent immediately gains its full fitness value and retains it for `y` number of years. Finally, the fitness power for the agent decays according to a decaying power-law curve. `x` and `y` here are drawn from uniform distributions built by the lag duration min/max values and peak duration min/max values, respectively.
 - `fitness_lag_duration_max`: maximum lag duration in years (inclusive). See `fitness_lag_duration_min`.
 - `fitness_peak_duration_min`: minimum peak duration in years (inclusive).See `fitness_lag_duration_min`.
 - `fitness_peak_duration_max`: maximum peak duration in years (inclusive). See `fitness_lag_duration_min`.
-- `neighborhood_sample`: maximum number of nodes to sample from each neighborhood. The neighborhoods of the genartor will be sampled such that the final list of nodes is at most this number.
-- `in_degree_threshold`: used for non-random generator selection. Selects the top percentile nodes by in-degree value, meaning that the top nth percentile node is found by in-degree, afterwhich all nodes with in-degree value at least that value is selected.
-- `fitness_threshold`: used for non-random generator selection. Selects the top percentile nodes by fitness value, meaning that the top nth percentile node is found by fitness, afterwhich all nodes with fitness value at least that value is selected.
+- `neighborhood_sample`: maximum number of nodes to sample from each neighborhood. The neighborhoods of the generator will be sampled such that the final list of nodes is at most this number.
+- `in_degree_threshold`: used for non-random generator selection. Selects the top percentile nodes by in-degree value, meaning that the top nth percentile node is found by in-degree, after which all nodes with an in-degree value of at least that value are selected.
+- `fitness_threshold`: used for non-random generator selection. Selects the top percentile nodes by fitness value, meaning that the top nth percentile node is found by fitness, after which all nodes with a fitness value of at least that value are selected.
 - `recency_threshold`: used for non-random generator selection. Selects only from the past n years e.g., if `recency_threshold=5` and current year is 1988, then 5 years of publications will be considered so the nodes with publication year at least 1983 and at most 1987.
 - `non_random_generator_probability`: Probability of each node to select a generator node in a non-random manner according to the different thresholds. Set to 0 for fully random and 1 for all non-random.
 - `author_max_lifetime`: used for the maximum amount of years that an author is allowed to publish. When this value is `k`, the difference between the publication year of the last paper and the publication year of the first paper of any given author cannot exceed `k`.
-- `num_authors_bag` : used for sampling the number of authors per paper. This is a CSV wherelthe header line is ignored and each subsequent line is structed as (index,number of authors). The index column is not used, and the number of authors column is used to sample a number for the number of authors for each paper.
+- `num_authors_bag` : used for sampling the number of authors per paper. This is a CSV where the header line is ignored and each subsequent line is structured as (index,number of authors). The index column is not used, and the number of authors column is used to sample a number for the number of authors for each paper.
 - `cartel_outdegree_proportion` : the proportion of out-degree that should go towards within the cartel group. Even if there are no cartel authors, make sure to set this to some value between 0 and 1. It will not be used if there are no cartel authors. **See below for important cartel information.**
-- `null_cartel` : boolean value e.g., true or false for whether to have cartel nodes cite randomly within the cartel or not. Set this to either true or falses even if there are no cartel authors. It will not be used if there are no cartel authors. True means "cartel-r" and False means "cartel-p". **See below for important cartel information.**
-- `clonal_cartel_agent_file` : csv with clonal agent attributes. The allowed columns are num\_authors,pa\_weight,fit\_weight,num\_authors\_weight,author\_reputation\_weight,out\_degree,alpha,fitness\_lag\_duration,fitness\_peak\_value, and fitness\_peak\_duration. The order of the columns do not matter, and any subset of these columns can be used and others omitted in the csv file. All cartel agents (cartel-r, cartel-p, or control) inherit these attributes. ( **See below for important cartel information.**
+- `null_cartel` : boolean value e.g., true or false for whether to have cartel nodes cite randomly within the cartel or not. Set this to either true or false even if there are no cartel authors. It will not be used if there are no cartel authors. True means "cartel-r" and False means "cartel-p". **See below for important cartel information.**
+- `clonal_cartel_agent_file` : csv with clonal agent attributes. The allowed columns are num\_authors,pa\_weight,fit\_weight,num\_authors\_weight,author\_reputation\_weight,out\_degree,alpha,fitness\_lag\_duration,fitness\_peak\_value, and fitness\_peak\_duration. The order of the columns do not matter, and any subset of these columns can be used and others omitted in the csv file. All cartel agents (cartel-r, cartel-p, or control) inherit these attributes. **See below for important cartel information.**
 
 
 #### General flags
@@ -203,6 +190,14 @@ Remember that
 - Whether a cartel node is in a control group or not is determined through the input nodelist `cartel_id` column, i.e., control if 0.
 - Whether a non-control cartel node is cartel-r or cartel-p is determined through the `null_cartel` flag.
 
+## Citation Methodology
+During the simulation, nodes make citations in several phases to fulfill their assigned citation quota (out-degree). The process follows these steps:
+
+1. **Reserving Quotas:** A specific portion of the citation quota is set aside for same-year and fully random citations.
+2. **Cartel Citations:** Next, if applicable, the node uses part of its remaining quota to cite other cartel members.
+3. **Primary Citations (1-hop or Cluster):** The `alpha` parameter determines the proportion of citations made in this phase. If the node belongs to a cluster that meets the minimum size threshold (`theta`), it will cite other nodes within its cluster. Otherwise, it defaults to standard field-aware (1-hop) citations.
+4. **Secondary Citations (2-hop):** The rest of the neighborhood citation quota is then used to make 2-hop citations.
+5. **Filling the Deficit:** If the node has not yet met its total assigned quota, the remaining citations are chosen completely at random. This shortfall can happen if earlier phases select duplicate nodes, or if there is overlap between the cluster citations and the 2-hop citations.
 
 ## Fitness Information
 For constant fitness, set minimum/maximum fitness lag duration to be 0 and minimum/maximum fitness peak duration to be 1000.
@@ -222,4 +217,4 @@ python leiden_clustering.py --nodelist <path_to_nodelist.csv> --edgelist <path_t
 - `--resolution` (default: 0.01): Resolution parameter for the Leiden algorithm.
 - `--objective` (default: "CPM"): Objective function to optimize (choices: "CPM" or "modularity").
 
-To use the output of this script in SASCA-ReSA, set the `community_assignment` flag in your `[Environment]` configuration to point to the generated output CSV.
+To use the output of this script in CantataS, set the `community_assignment` flag in your `[Environment]` configuration to point to the generated output CSV.

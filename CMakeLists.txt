@@ -18,7 +18,7 @@ else()
 
     set(ABM_MAJOR_VERSION 7)
     set(ABM_MINOR_VERSION 0)
-    set(ABM_PATCH_VERSION 3)
+    set(ABM_PATCH_VERSION 4)
     set(ABM_VERSION
         ${ABM_MAJOR_VERSION}.
         ${ABM_MINOR_VERSION}.
