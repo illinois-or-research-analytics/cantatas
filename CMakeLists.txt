@@ -45,11 +45,20 @@ else()
     )
     #[[ CONSTANTS END ]]
 
+    set(LADYBUG_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_node_store.cpp
+        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_csr.cpp
+        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_cluster_index.cpp
+        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_author_store.cpp
+        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_db.cpp
+    )
+
     #[[ Define the output binary ]]
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
     add_executable(abm
         ${SOURCE_MAIN}
         ${SOURCE_FILES}
+        ${LADYBUG_SOURCES}
         )
 
     #[[ Link libraries ]]
@@ -61,6 +70,29 @@ else()
     target_include_directories(abm
         PUBLIC ${CMAKE_SOURCE_DIR}/includes
     )
+
+    #[[ LadyBugDB Unit Tests ]]
+    enable_testing()
+
+    add_executable(test_ladybug_mmap tests/test_ladybug_mmap.cpp)
+    target_link_libraries(test_ladybug_mmap PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    target_include_directories(test_ladybug_mmap PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_ladybug_mmap COMMAND test_ladybug_mmap)
+
+    add_executable(test_ladybug_node_store tests/test_ladybug_node_store.cpp ${LADYBUG_SOURCES} ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_ladybug_node_store PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    target_include_directories(test_ladybug_node_store PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_ladybug_node_store COMMAND test_ladybug_node_store)
+
+    add_executable(test_ladybug_csr tests/test_ladybug_csr.cpp ${LADYBUG_SOURCES} ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_ladybug_csr PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    target_include_directories(test_ladybug_csr PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_ladybug_csr COMMAND test_ladybug_csr)
+
+    add_executable(test_ladybug_db tests/test_ladybug_db.cpp ${LADYBUG_SOURCES} ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_ladybug_db PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    target_include_directories(test_ladybug_db PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_ladybug_db COMMAND test_ladybug_db)
 
 
 endif("${CMAKE_BINARY_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")

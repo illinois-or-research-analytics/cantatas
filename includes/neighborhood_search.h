@@ -20,33 +20,33 @@ public:
 
   /*
   Input: Graph *graph, int current_year, const std::vector<int>
-  &generator_nodes, int num_hops Output: std::unordered_map<int,
-  std::vector<int>> (map of author ID to their neighborhood nodes) Description:
+  &generator_nodes, int num_hops Output: std::vector<std::vector<int>>
+  (vector indexed by distance 1..num_hops) Description:
   Main entry point for gathering neighborhood nodes. Defers to specific N-hop
                strategies based on the configuration of the search instance.
   */
-  std::unordered_map<int, std::vector<int>>
+  std::vector<std::vector<int>>
   GetNeighborhoodMap(Graph *graph, int current_year,
                      const std::vector<int> &generator_nodes, int num_hops);
   /*
   Input: Graph *graph, int current_year, const std::vector<int>
-  &generator_nodes, int num_hops Output: std::unordered_map<int,
-  std::vector<int>> (map of author ID to neighbor nodes) Description:
+  &generator_nodes, int num_hops Output: std::vector<std::vector<int>>
+  (vector indexed by distance 1..2) Description:
   Specifically computes the union of the 1-hop and 2-hop co-author network for
   the given generator nodes, filtering by the current year.
   */
-  std::unordered_map<int, std::vector<int>>
+  std::vector<std::vector<int>>
   GetOneAndTwoDistanceNeighborhoods(Graph *graph, int current_year,
                                     const std::vector<int> &generator_nodes,
                                     int num_hops);
   /*
   Input: Graph *graph, int current_year, const std::vector<int>
-  &generator_nodes, int num_hops Output: std::unordered_map<int,
-  std::vector<int>> (map of author ID to neighbor nodes) Description: Computes
+  &generator_nodes, int num_hops Output: std::vector<std::vector<int>>
+  (vector indexed by distance 1..num_hops) Description: Computes
   the N-hop co-author network recursively or iteratively, expanding outward up
   to num_hops distances.
   */
-  std::unordered_map<int, std::vector<int>>
+  std::vector<std::vector<int>>
   GetNHopNeighborhood(Graph *graph, int current_year,
                       const std::vector<int> &generator_nodes, int num_hops);
 
@@ -65,42 +65,43 @@ public:
   */
   int GetBinIndex(Graph *graph, int current_node, int current_year);
   /*
-  Input: Graph *graph, int current_year, std::vector<int> n_hop_list
-  Output: std::unordered_map<int, std::vector<int>> (bin index mapped to nodes
+  Input: Graph *graph, int current_year, const std::vector<int> &n_hop_list
+  Output: std::vector<std::vector<int>> (bin index mapped to nodes
   in that age bin) Description: Partitions a flat list of neighborhood nodes
   into separate buckets depending on how recently the papers were published.
   */
-  std::unordered_map<int, std::vector<int>>
-  BinNeighborhood(Graph *graph, int current_year, std::vector<int> n_hop_list);
+  std::vector<std::vector<int>>
+  BinNeighborhood(Graph *graph, int current_year, const std::vector<int> &n_hop_list);
   /*
-  Input: const std::unordered_map<int, std::vector<int>> &binned_neighborhood,
-         int total_outdegree, const std::unordered_map<int, double>&
-  binned_recency_probabilities Output: std::unordered_map<int, int> (number of
+  Input: const std::vector<std::vector<int>> &binned_neighborhood,
+         int total_outdegree, const std::vector<double>&
+  binned_recency_probabilities Output: std::vector<int> (number of
   citations allocated per bin) Description: Allocates a quota of out-degree
   (citations) across different age bins based on the configured probability
   distribution for recency.
   */
-  std::unordered_map<int, int> BinOutdegrees(
-      const std::unordered_map<int, std::vector<int>> &binned_neighborhood,
+  std::vector<int> BinOutdegrees(
+      const std::vector<std::vector<int>> &binned_neighborhood,
       int total_outdegree,
-      const std::unordered_map<int, double> &binned_recency_probabilities);
+      const std::vector<double> &binned_recency_probabilities);
   /*
   Input: double alpha, int total_num_citations_neighborhood,
-         const std::unordered_map<int, std::vector<int>> &n_hop_map
-  Output: std::unordered_map<int, int> (target node mapped to its allocated
+         const std::vector<std::vector<int>> &n_hop_map
+  Output: std::vector<int> (target distance index mapped to its allocated
   citation count) Description: Determines the precise number of citations to
   distribute across various distances or groups in the neighborhood based on an
   alpha bias factor.
   */
-  std::unordered_map<int, int> GetNumCitationsPerNeighborhood(
+  std::vector<int> GetNumCitationsPerNeighborhood(
       double alpha, int total_num_citations_neighborhood,
-      const std::unordered_map<int, std::vector<int>> &n_hop_map);
+      const std::vector<std::vector<int>> &n_hop_map);
 
   std::string recency_bins_str;
   bool use_alpha;
   int neighborhood_sample;
   int num_bins;
   std::vector<int> bin_boundaries;
+  std::vector<int> recency_bin_lut;
   /*
   Input: None
   Output: void
@@ -108,6 +109,7 @@ public:
   internal integer boundary vectors for rapid bin lookups.
   */
   void InitializeBinBoundaries();
+  void BuildBinLUT();
 };
 
 #endif

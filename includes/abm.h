@@ -75,7 +75,7 @@ public:
   SimLogger logger;
 
   Graph *graph;
-  std::unordered_map<int, int> continuous_node_mapping;
+  std::vector<int> continuous_node_mapping;
   std::vector<int> reverse_continuous_node_mapping;
   int start_year;
   int next_node_id;
@@ -92,6 +92,7 @@ public:
   std::vector<double> fit_vec;
   std::vector<double> na_vec;
   std::vector<double> ar_vec;
+  std::vector<NodeScoreComponents> node_score_components_vec;
   std::vector<double> random_weight_vec;
   std::vector<double> current_score_vec;
 
@@ -239,19 +240,19 @@ public:
   void ReadCommunityAssignment();
   /*
   Input: Graph *graph
-  Output: std::unordered_map<int, int> (continuous node mapping)
+  Output: std::vector<int> (continuous node mapping)
   Description: Builds a mapping from potentially non-contiguous graph node IDs
   to a continuous, 0-indexed integer range, which is required for array
   allocations.
   */
-  std::unordered_map<int, int> BuildContinuousNodeMapping(Graph *graph);
+  std::vector<int> BuildContinuousNodeMapping(Graph *graph);
   /*
-  Input: const std::unordered_map<int, int> &mapping
+  Input: const std::vector<int> &mapping
   Output: std::vector<int> (reverse mapping)
   Description: Inverts the continuous node mapping, returning a vector where the
   index is the continuous ID and the value is the original graph node ID.
   */
-  std::vector<int> ReverseMapping(const std::unordered_map<int, int> &mapping);
+  std::vector<int> ReverseMapping(const std::vector<int> &mapping);
   /*
   Input: Graph *graph
   Output: int (total projected size)
@@ -305,7 +306,7 @@ public:
                                                     int new_node) const;
   NeighborhoodSearch *neighborhood_search;
   CitationEngine *citation_engine;
-  std::unordered_map<int, double> GetBinnedRecencyProbabilities();
+  std::vector<double> GetBinnedRecencyProbabilities();
   /*
   Input: Graph *graph
   Output: void
@@ -396,7 +397,7 @@ public:
       const std::unordered_map<int, int> &planted_nodes_line_number_map);
   /*
   Input: Graph *graph, const std::vector<int> &new_nodes_vec, const
-  std::unordered_map<int, int> &continuous_node_mapping, std::span<int>
+  std::vector<int> &continuous_node_mapping, std::span<int>
   fitness_lag_duration_span, std::span<int> fitness_peak_value_span,
   std::span<int> fitness_peak_duration_span, int initial_graph_size Output: void
   Description: Bulk-updates the temporal fitness trajectories (lag, peak,
@@ -404,18 +405,18 @@ public:
   */
   void UpdateGraphAttributesFitnesses(
       Graph *graph, const std::vector<int> &new_nodes_vec,
-      const std::unordered_map<int, int> &continuous_node_mapping,
+      const std::vector<int> &continuous_node_mapping,
       std::span<int> fitness_lag_duration_span,
       std::span<int> fitness_peak_value_span,
       std::span<int> fitness_peak_duration_span, int initial_graph_size);
   /*
-  Input: Graph *graph, const std::unordered_map<int, int>
+  Input: Graph *graph, const std::vector<int>
   &continuous_node_mapping, std::span<int> num_authors_span Output: void
   Description: Bulk-updates the author count properties into the graph for new
   nodes.
   */
   void UpdateGraphAttributesNumAuthors(
-      Graph *graph, const std::unordered_map<int, int> &continuous_node_mapping,
+      Graph *graph, const std::vector<int> &continuous_node_mapping,
       std::span<int> num_authors_span);
 
   /*

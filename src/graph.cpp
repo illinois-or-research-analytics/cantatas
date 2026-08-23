@@ -497,15 +497,14 @@ int Graph::GetClusterSize(int cluster_id, int current_year) const {
   auto it = this->cluster_nodes_map.find(cluster_id);
   if (it != this->cluster_nodes_map.end()) {
     if (current_year == -1) {
-      return it->second.size();
+      return static_cast<int>(it->second.size());
     }
-    int count = 0;
-    for (int node : it->second) {
-      if (this->GetYear(node) < current_year) {
-        count++;
-      }
-    }
-    return count;
+    const auto &nodes = it->second;
+    auto comp = [this](int node, int yr) {
+      return this->GetYear(node) < yr;
+    };
+    auto lower = std::lower_bound(nodes.begin(), nodes.end(), current_year, comp);
+    return static_cast<int>(lower - nodes.begin());
   }
   return 0;
 }
