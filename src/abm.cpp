@@ -20,35 +20,62 @@
             .insert(omp_out.end(), omp_in.begin(), omp_in.end()))              \
     initializer(omp_priv = decltype(omp_orig){})
 
-std::unordered_map<int, double> ABM::GetBinnedRecencyProbabilities() {
-  std::unordered_map<int, double> binned_recency_probabilities;
+std::vector<double> ABM::GetBinnedRecencyProbabilities() {
+  std::vector<double> binned_recency_probabilities(this->neighborhood_search->num_bins, 0.0);
   double binned_recency_sum = 0;
   for (const auto &[year_diff, count] : this->recency_counts_map) {
     int current_bin_index = this->neighborhood_search->GetBinIndex(year_diff);
-    binned_recency_probabilities[current_bin_index] += count;
-    binned_recency_sum += count;
+    if (current_bin_index >= 0 && (size_t)current_bin_index < binned_recency_probabilities.size()) {
+      binned_recency_probabilities[current_bin_index] += count;
+      binned_recency_sum += count;
+    }
   }
-  for (const auto &recency_pair : binned_recency_probabilities) {
-    binned_recency_probabilities[recency_pair.first] /= binned_recency_sum;
+  if (binned_recency_sum > 0) {
+    for (size_t i = 0; i < binned_recency_probabilities.size(); ++i) {
+      binned_recency_probabilities[i] /= binned_recency_sum;
+    }
   }
   return binned_recency_probabilities;
 }
 
-std::unordered_map<int, int> ABM::BuildContinuousNodeMapping(Graph *graph) {
-  this->next_node_id = 0;
-  std::unordered_map<int, int> continuous_node_mapping;
-  for (auto const &node : graph->GetNodeSet()) {
-    continuous_node_mapping[node] = this->next_node_id;
-    this->next_node_id++;
+std::vector<int> ABM::BuildContinuousNodeMapping(Graph *graph) {
+  int max_node = 0;
+  for (int node : graph->GetNodeSet()) {
+    if (node > max_node) {
+      max_node = node;
+    }
   }
+  int estimated_final_size = this->GetFinalGraphSize(graph);
+  int capacity = std::max(estimated_final_size * 2, max_node + estimated_final_size + 1000);
+  std::vector<int> continuous_node_mapping(capacity, -1);
+  int current_idx = 0;
+  for (auto const &node : graph->GetNodeSet()) {
+    if ((size_t)node >= continuous_node_mapping.size()) {
+      continuous_node_mapping.resize(node + 10000, -1);
+    }
+    continuous_node_mapping[node] = current_idx;
+    current_idx++;
+  }
+  this->next_node_id = current_idx;
   return continuous_node_mapping;
 }
 
-std::vector<int>
-ABM::ReverseMapping(const std::unordered_map<int, int> &mapping) {
-  std::vector<int> reverse_mapping(mapping.size());
-  for (auto const &[key, val] : mapping) {
-    reverse_mapping[val] = key;
+std::vector<int> ABM::ReverseMapping(const std::vector<int> &mapping) {
+  int max_val = 0;
+  for (int val : mapping) {
+    if (val > max_val) {
+      max_val = val;
+    }
+  }
+  std::vector<int> reverse_mapping(max_val + 1, -1);
+  for (size_t key = 0; key < mapping.size(); ++key) {
+    int val = mapping[key];
+    if (val >= 0) {
+      if ((size_t)val >= reverse_mapping.size()) {
+        reverse_mapping.resize(val + 1024, -1);
+      }
+      reverse_mapping[val] = static_cast<int>(key);
+    }
   }
   return reverse_mapping;
 }
@@ -194,10 +221,12 @@ void ABM::UpdateGraphAttributesWeights(
 }
 
 void ABM::UpdateGraphAttributesNumAuthors(
-    Graph *graph, const std::unordered_map<int, int> &continuous_node_mapping,
+    Graph *graph, const std::vector<int> &continuous_node_mapping,
     std::span<int> num_authors_span) {
   for (auto const &node_id : graph->GetNodeSet()) {
-    int continuous_id = continuous_node_mapping.at(node_id);
+    int continuous_id = ((size_t)node_id < continuous_node_mapping.size())
+                            ? continuous_node_mapping[node_id]
+                            : node_id;
     graph->SetNumAuthors(node_id, num_authors_span[continuous_id]);
   }
 }
@@ -215,14 +244,16 @@ void ABM::UpdateGraphAttributesInitialAuthorReputations(
 
 void ABM::UpdateGraphAttributesFitnesses(
     Graph *graph, const std::vector<int> &new_nodes_vec,
-    const std::unordered_map<int, int> &continuous_node_mapping,
+    const std::vector<int> &continuous_node_mapping,
     std::span<int> fitness_lag_duration_span,
     std::span<int> fitness_peak_value_span,
     std::span<int> fitness_peak_duration_span, int initial_graph_size) {
   for (size_t i = 0; i < new_nodes_vec.size(); i++) {
     int current_node_id = new_nodes_vec.at(i);
-    int current_weight_span_index =
-        continuous_node_mapping.at(current_node_id) - initial_graph_size;
+    int continuous_id = ((size_t)current_node_id < continuous_node_mapping.size())
+                            ? continuous_node_mapping[current_node_id]
+                            : current_node_id;
+    int current_weight_span_index = continuous_id - initial_graph_size;
     graph->SetFitnessLagDuration(
         current_node_id, fitness_lag_duration_span[current_weight_span_index]);
     graph->SetFitnessPeakValue(
@@ -763,6 +794,7 @@ void ABM::InitializeSimulation() {
   this->fit_vec.resize(this->final_graph_size);
   this->na_vec.resize(this->final_graph_size);
   this->ar_vec.resize(this->final_graph_size);
+  this->node_score_components_vec.resize(this->final_graph_size);
   this->random_weight_vec.resize(this->final_graph_size);
   this->current_score_vec.resize(this->final_graph_size);
   // this->initial_graph_size in the continuous mapping
@@ -809,7 +841,7 @@ void ABM::RunSimulationLoop() {
   for (int i = 0; i < 1000; i++) {
     exp_cached_results[i] = std::max(pow(i, this->gamma), 1.0) + 1;
   }
-  std::unordered_map<int, double> binned_recency_probabilities =
+  std::vector<double> binned_recency_probabilities =
       GetBinnedRecencyProbabilities();
   Eigen::setNbThreads(1);
   pcg32 &generator = Utils::GetThreadLocalPRNG();
@@ -858,8 +890,14 @@ void ABM::RunSimulationLoop() {
                                     " nodes this year",
                                 Log::info);
     for (int i = 0; i < num_new_nodes; i++) {
+      if ((size_t)this->next_node_id >= this->continuous_node_mapping.size()) {
+        this->continuous_node_mapping.resize(this->next_node_id + 10000, -1);
+      }
       this->continuous_node_mapping[this->next_node_id] =
           current_graph_size + i;
+      if ((size_t)(current_graph_size + i) >= this->reverse_continuous_node_mapping.size()) {
+        this->reverse_continuous_node_mapping.resize(current_graph_size + i + 10000, -1);
+      }
       this->reverse_continuous_node_mapping[current_graph_size + i] =
           this->next_node_id;
       new_nodes_vec.push_back(this->next_node_id);
@@ -989,11 +1027,18 @@ void ABM::RunSimulationLoop() {
     std::vector<int> fully_random_citations_map(new_nodes_vec.size());
     std::vector<std::vector<int>> sampled_binned_neighborhood_sizes_map(
         new_nodes_vec.size());
+
+#pragma omp parallel for simd
+    for (int idx = 0; idx < current_graph_size; ++idx) {
+      this->node_score_components_vec[idx].pa = this->pa_vec[idx];
+      this->node_score_components_vec[idx].fit = this->fit_vec[idx];
+      this->node_score_components_vec[idx].na = this->na_vec[idx];
+      this->node_score_components_vec[idx].ar = this->ar_vec[idx];
+    }
+
     NodeMetrics metrics = {
-        std::span<double>{this->pa_vec.data(), (size_t)current_graph_size},
-        std::span<double>{this->fit_vec.data(), (size_t)current_graph_size},
-        std::span<double>{this->na_vec.data(), (size_t)current_graph_size},
-        std::span<double>{this->ar_vec.data(), (size_t)current_graph_size}};
+        std::span<const NodeScoreComponents>{this->node_score_components_vec.data(),
+                                             (size_t)current_graph_size}};
 
     int max_threads = omp_get_max_threads();
     std::vector<std::vector<std::pair<int, int>>> thread_local_new_edges_vec(
@@ -1026,23 +1071,10 @@ void ABM::RunSimulationLoop() {
       std::fill(citations_vec.begin(), citations_vec.end(), 0);
       std::span<int> citations(citations_vec);
       int new_node = new_nodes_vec[i];
-      // this->continuous_node_mapping = node id -> 0..n but guaranteed 0 ..
-      // initial this->graph size are seed nodes initial graphsize .. n are
-      // agent nodes
-      int weight_span_index;
-      try {
-        weight_span_index = this->continuous_node_mapping.at(new_node) -
-                            this->initial_graph_size;
-      } catch (const std::out_of_range &e) {
-#pragma omp critical
-        {
-          fprintf(stderr,
-                  "CRASH: continuous_node_mapping missing new_node %d\n",
-                  new_node);
-          fflush(stderr);
-        }
-        throw;
-      }
+      int continuous_id = ((size_t)new_node < this->continuous_node_mapping.size())
+                              ? this->continuous_node_mapping[new_node]
+                              : new_node;
+      int weight_span_index = continuous_id - this->initial_graph_size;
       double pa_weight = this->pa_weight_vec[weight_span_index];
       double fit_weight = this->fit_weight_vec[weight_span_index];
       double num_authors_weight =
@@ -1056,9 +1088,9 @@ void ABM::RunSimulationLoop() {
       std::vector<int> generator_nodes =
           this->GetGraphAttributesGeneratorNodes(this->graph, new_node);
       int num_hops = 2;
-      // if use alpha then map has keys 1 and 2
-      // if use alpha false then map has only key 1
-      std::unordered_map<int, std::vector<int>> n_hop_map =
+      // if use alpha then vector has size 3 (indices 1 and 2)
+      // if use alpha false then vector has size 2 (index 1)
+      std::vector<std::vector<int>> n_hop_map =
           this->neighborhood_search->GetNeighborhoodMap(
               this->graph, current_year, generator_nodes, num_hops);
 
@@ -1077,16 +1109,18 @@ void ABM::RunSimulationLoop() {
             filtered_cluster_nodes.push_back(node);
           }
         }
-        n_hop_map[1] = filtered_cluster_nodes;
+        if (n_hop_map.size() > 1) {
+          n_hop_map[1] = std::move(filtered_cluster_nodes);
+        }
 
-        if (n_hop_map.contains(2)) {
+        if (n_hop_map.size() > 2) {
           std::vector<int> pruned_2_hop;
           for (int node : n_hop_map[2]) {
             if (this->graph->GetCommunityAssignment(node) != cluster_id) {
               pruned_2_hop.push_back(node);
             }
           }
-          n_hop_map[2] = pruned_2_hop;
+          n_hop_map[2] = std::move(pruned_2_hop);
         }
       }
 
@@ -1139,70 +1173,44 @@ void ABM::RunSimulationLoop() {
       // remove cartel cited nodes from n_hop_map
       std::set<int> cited_elements(citations.begin(),
                                    citations.begin() + num_actually_cited);
-      std::unordered_map<int, std::vector<int>> filtered_n_hop_map;
-      for (auto const &[distance, node_vec] : n_hop_map) {
+      std::vector<std::vector<int>> filtered_n_hop_map(n_hop_map.size());
+      for (size_t distance = 1; distance < n_hop_map.size(); ++distance) {
         filtered_n_hop_map[distance].reserve(this->neighborhood_sample);
-        for (auto const &node_id : node_vec) {
+        for (int node_id : n_hop_map[distance]) {
           if (!cited_elements.contains(node_id)) {
             filtered_n_hop_map[distance].push_back(node_id);
           }
         }
       }
-      n_hop_map = filtered_n_hop_map;
+      n_hop_map = std::move(filtered_n_hop_map);
       if (remaining_citation_quota > 0) {
-        std::unordered_map<int, int> num_citations_per_neighborhood =
+        std::vector<int> num_citations_per_neighborhood =
             this->neighborhood_search->GetNumCitationsPerNeighborhood(
                 alpha, remaining_citation_quota, n_hop_map);
         for (size_t current_neighborhood_index = 1;
-             current_neighborhood_index < n_hop_map.size() + 1;
+             current_neighborhood_index < n_hop_map.size();
              current_neighborhood_index++) { // 2 iter if use alpha true
-          try {
-            sampled_neighborhood_sizes_map[i] +=
-                n_hop_map.at(current_neighborhood_index).size();
-          } catch (...) {
-#pragma omp critical
-            {
-              fprintf(stderr, "CRASH: n_hop_map missing %d\n",
-                      (int)current_neighborhood_index);
-              fflush(stderr);
-            }
-            throw;
-          }
-          std::unordered_map<int, std::vector<int>> binned_neighborhood;
-          try {
-            binned_neighborhood = this->neighborhood_search->BinNeighborhood(
-                this->graph, current_year,
-                n_hop_map.at(current_neighborhood_index));
-          } catch (...) {
-#pragma omp critical
-            {
-              fprintf(stderr,
-                      "CRASH: n_hop_map missing in BinNeighborhood %d\n",
-                      (int)current_neighborhood_index);
-              fflush(stderr);
-            }
-            throw;
-          }
+          sampled_neighborhood_sizes_map[i] +=
+              n_hop_map[current_neighborhood_index].size();
+
+          std::vector<std::vector<int>> binned_neighborhood =
+              this->neighborhood_search->BinNeighborhood(
+                  this->graph, current_year,
+                  n_hop_map[current_neighborhood_index]);
+
           local_prev_time =
               this->logger.LocalLogTime(local_parallel_stage_time_vec,
                                         local_prev_time, "bin neighborhood");
 
-          std::unordered_map<int, int> outdegree_per_bin_map;
-          try {
-            outdegree_per_bin_map = this->neighborhood_search->BinOutdegrees(
-                binned_neighborhood,
-                num_citations_per_neighborhood.at(current_neighborhood_index),
-                binned_recency_probabilities);
-          } catch (...) {
-#pragma omp critical
-            {
-              fprintf(stderr,
-                      "CRASH: num_citations_per_neighborhood missing %d\n",
-                      (int)current_neighborhood_index);
-              fflush(stderr);
-            }
-            throw;
-          }
+          int neighborhood_quota = (current_neighborhood_index < num_citations_per_neighborhood.size())
+                                       ? num_citations_per_neighborhood[current_neighborhood_index]
+                                       : 0;
+          std::vector<int> outdegree_per_bin_map =
+              this->neighborhood_search->BinOutdegrees(
+                  binned_neighborhood,
+                  neighborhood_quota,
+                  binned_recency_probabilities);
+
           for (int bin_index = 0;
                bin_index < this->neighborhood_search->num_bins - 1;
                bin_index++) { // if there's only 1 bin then this is always false

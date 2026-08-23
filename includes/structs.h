@@ -6,11 +6,15 @@
 #include <unordered_map>
 #include <vector>
 
+struct alignas(32) NodeScoreComponents {
+  double pa = 0.0;
+  double fit = 0.0;
+  double na = 0.0;
+  double ar = 0.0;
+};
+
 struct NodeMetrics {
-  std::span<double> pa_span;
-  std::span<double> fit_span;
-  std::span<double> na_span;
-  std::span<double> ar_span;
+  std::span<const NodeScoreComponents> components;
 };
 
 struct AgentWeights {

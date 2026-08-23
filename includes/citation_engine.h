@@ -45,7 +45,7 @@ public:
       std::vector<int> &generator_nodes, std::span<int> citations,
       int num_cited_so_far, int num_citations);
   /*
-  Input: Graph *graph, const std::unordered_map<int, int>
+  Input: Graph *graph, const std::vector<int>
   &continuous_node_mapping, int current_year, const std::vector<int>
   &candidate_nodes, std::span<int> citations, int current_graph_size, int
   num_citations Output: int (number of citations made) Description: Makes
@@ -53,39 +53,39 @@ public:
   nodes.
   */
   int MakeUniformRandomCitations(
-      Graph *graph, const std::unordered_map<int, int> &continuous_node_mapping,
+      Graph *graph, const std::vector<int> &continuous_node_mapping,
       int current_year, const std::vector<int> &candidate_nodes,
       std::span<int> citations, int current_graph_size, int num_citations);
   /*
-  Input: Graph *graph, int author_id, const std::unordered_map<int,
-  std::vector<int>> &n_hop_map, int total_num_citations_neighborhood Output: int
+  Input: Graph *graph, int author_id, const std::vector<std::vector<int>>
+  &n_hop_map, int total_num_citations_neighborhood Output: int
   (quota of cartel citations) Description: Calculates how many citations should
   be directed toward cartel co-authors based on neighborhood density and
   historical behavior.
   */
   int GetNumCartelCitations(
       Graph *graph, int author_id,
-      const std::unordered_map<int, std::vector<int>> &n_hop_map,
+      const std::vector<std::vector<int>> &n_hop_map,
       int total_num_citations_neighborhood);
   /*
   Input: Graph *graph, const std::vector<int> &generator_nodes, int author_id,
-         const std::unordered_map<int, int> &continuous_node_mapping,
-         const std::unordered_map<int, std::vector<int>> &n_hop_map,
+         const std::vector<int> &continuous_node_mapping,
+         const std::vector<std::vector<int>> &n_hop_map,
   std::span<int> citations, int num_cartel_citations Output: int (number of
   cartel citations actually made) Description: Assigns citations uniformly at
   random within the author's cartel network (null model for cartel behavior).
   */
   int MakeNullCartelCitations(
       Graph *graph, const std::vector<int> &generator_nodes, int author_id,
-      const std::unordered_map<int, int> &continuous_node_mapping,
-      const std::unordered_map<int, std::vector<int>> &n_hop_map,
+      const std::vector<int> &continuous_node_mapping,
+      const std::vector<std::vector<int>> &n_hop_map,
       std::span<int> citations, int num_cartel_citations);
   /*
   Input: Graph *graph, const std::vector<int> &generator_nodes, int author_id,
-         const std::unordered_map<int, int> &continuous_node_mapping,
-         const std::unordered_map<int, std::vector<int>> &n_hop_map,
+         const std::vector<int> &continuous_node_mapping,
+         const std::vector<std::vector<int>> &n_hop_map,
   std::span<int> citations, int num_cartel_citations, int current_year, const
-  std::unordered_map<int, double> &binned_recency_probabilities, const
+  std::vector<double> &binned_recency_probabilities, const
   NodeMetrics &metrics, const AgentWeights &weights, int current_graph_size
   Output: int (number of citations made)
   Description: Distributes cartel citations intelligently based on node metrics
@@ -93,10 +93,10 @@ public:
   */
   int MakeScoredCartelCitations(
       Graph *graph, const std::vector<int> &generator_nodes, int author_id,
-      const std::unordered_map<int, int> &continuous_node_mapping,
-      const std::unordered_map<int, std::vector<int>> &n_hop_map,
+      const std::vector<int> &continuous_node_mapping,
+      const std::vector<std::vector<int>> &n_hop_map,
       std::span<int> citations, int num_cartel_citations, int current_year,
-      const std::unordered_map<int, double> &binned_recency_probabilities,
+      const std::vector<double> &binned_recency_probabilities,
       const NodeMetrics &metrics, const AgentWeights &weights,
       int current_graph_size);
   /*
@@ -108,14 +108,14 @@ public:
   */
   int MakeCartelCitations(
       Graph *graph, const std::vector<int> &generator_nodes, int author_id,
-      const std::unordered_map<int, int> &continuous_node_mapping,
-      const std::unordered_map<int, std::vector<int>> &n_hop_map,
+      const std::vector<int> &continuous_node_mapping,
+      const std::vector<std::vector<int>> &n_hop_map,
       std::span<int> citations, int num_cartel_citations, int current_year,
-      const std::unordered_map<int, double> &binned_recency_probabilities,
+      const std::vector<double> &binned_recency_probabilities,
       const NodeMetrics &metrics, const AgentWeights &weights,
       int current_graph_size);
   /*
-  Input: Graph *graph, const std::unordered_map<int, int>
+  Input: Graph *graph, const std::vector<int>
   &continuous_node_mapping, int current_year, const std::vector<int>
   &candidate_nodes, std::span<int> citations, const NodeMetrics &metrics, const
   AgentWeights &weights, int current_graph_size, int num_citations Output: int
@@ -124,7 +124,7 @@ public:
   attachment, fitness, reputation, etc.).
   */
   int MakeCitations(Graph *graph,
-                    const std::unordered_map<int, int> &continuous_node_mapping,
+                    const std::vector<int> &continuous_node_mapping,
                     int current_year, const std::vector<int> &candidate_nodes,
                     std::span<int> citations, const NodeMetrics &metrics,
                     const AgentWeights &weights, int current_graph_size,
