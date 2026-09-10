@@ -69,7 +69,8 @@ ABM::PlantNodes(Graph *graph, std::span<double> pa_weight_span,
                 std::span<int> fitness_peak_value_span,
                 std::span<int> fitness_peak_duration_span,
                 std::span<int> num_authors_span,
-                std::span<int> planted_author_id_span) {
+                std::span<int> planted_author_id_span,
+                std::span<int> planted_cluster_id_span) {
   int current_graph_size = graph->GetNodeSet().size();
   this->initial_graph_size = current_graph_size;
   const std::unordered_map<std::string, std::pair<std::string, void *>>
@@ -91,17 +92,22 @@ ABM::PlantNodes(Graph *graph, std::span<double> pa_weight_span,
           {"num_authors",
            {"int",
             (void *)(this->num_authors_vec.data() + this->initial_graph_size)}},
-          {"author_id", {"int", (void *)(this->planted_author_id_vec.data())}}};
-  std::unordered_map<int, int> planted_nodes_line_number_map;
+          {"author_id", {"int", (void *)(this->planted_author_id_vec.data())}},
+          {"cluster_id",
+           {"int", (void *)(this->planted_cluster_id_vec.data())}},
+          {"community_assignment",
+           {"int", (void *)(this->planted_cluster_id_vec.data())}}};
+  this->planted_nodes_line_number_map.clear();
   pcg32 &generator = Utils::GetThreadLocalPRNG();
-  int previous_graph_size = 0;
   for (int current_relative_year = 0;
-       current_relative_year < this->num_cycles + 1; current_relative_year++) {
+       current_relative_year < this->num_cycles; current_relative_year++) {
     int num_new_nodes = std::ceil(current_graph_size * this->growth_rate);
-    if (this->planted_nodes_map.count(current_relative_year)) {
+    int year_start_index = current_graph_size;
+    int year_end_index = current_graph_size + num_new_nodes - 1;
+    if (this->planted_nodes_map.count(current_relative_year) && num_new_nodes > 0) {
       std::unordered_set<int> selected;
       std::uniform_int_distribution<int> new_nodes_distribution{
-          previous_graph_size, current_graph_size - 1};
+          year_start_index, year_end_index};
       std::unordered_map<int, std::unordered_map<std::string, std::string>>
           current_year_map = this->planted_nodes_map.at(current_relative_year);
       for (auto const &[line_no, line_map] : current_year_map) {
@@ -132,7 +138,6 @@ ABM::PlantNodes(Graph *graph, std::span<double> pa_weight_span,
         }
       }
     }
-    previous_graph_size = current_graph_size;
     current_graph_size += num_new_nodes;
   }
   return this->planted_nodes_line_number_map;
@@ -279,21 +284,24 @@ void ABM::UpdateGraphAttributesAuthors(Graph *graph, int new_node,
 }
 
 void ABM::UpdateGraphAttributesGeneratorNodes(
-    Graph *graph, int new_node, const std::vector<int> &generator_nodes) {
+    Graph *graph, int new_node, const std::vector<int> &generator_nodes,
+    int explicit_cluster_id) {
   std::string generator_node_string;
-  int inherited_cluster_id = -1;
+  int cluster_id = explicit_cluster_id;
   if (!generator_nodes.empty()) {
     generator_node_string += std::to_string(generator_nodes.at(0));
-    inherited_cluster_id = graph->GetCommunityAssignment(generator_nodes.at(0));
+    if (cluster_id < 0) {
+      cluster_id = graph->GetCommunityAssignment(generator_nodes.at(0));
+    }
     for (size_t i = 1; i < generator_nodes.size(); i++) {
       generator_node_string += ";";
       generator_node_string += std::to_string(generator_nodes.at(i));
     }
   }
   graph->SetGeneratorNodeString(new_node, generator_node_string);
-  graph->SetCommunityAssignment(new_node, inherited_cluster_id);
-  if (inherited_cluster_id >= 0) {
-    graph->AddNodeToCluster(new_node, inherited_cluster_id);
+  graph->SetCommunityAssignment(new_node, cluster_id);
+  if (cluster_id >= 0) {
+    graph->AddNodeToCluster(new_node, cluster_id);
   }
 }
 
@@ -777,6 +785,7 @@ void ABM::InitializeSimulation() {
   this->fitness_peak_value_vec.assign(added_size, -1);
   this->fitness_peak_duration_vec.assign(added_size, -1);
   this->planted_author_id_vec.assign(added_size, -1);
+  this->planted_cluster_id_vec.assign(added_size, -1);
   MetricsEngine::PopulateWeightSpans(
       this->pa_weight_vec, this->fit_weight_vec, this->num_authors_weight_vec,
       this->author_reputation_weight_vec, this->preferential_weight,
@@ -798,7 +807,8 @@ void ABM::InitializeSimulation() {
       this->num_authors_weight_vec, this->author_reputation_weight_vec,
       this->out_degree_vec, this->alpha_vec, this->fitness_lag_duration_vec,
       this->fitness_peak_value_vec, this->fitness_peak_duration_vec,
-      this->num_authors_vec, this->planted_author_id_vec);
+      this->num_authors_vec, this->planted_author_id_vec,
+      this->planted_cluster_id_vec);
 }
 
 void ABM::RunSimulationLoop() {
@@ -948,6 +958,12 @@ void ABM::RunSimulationLoop() {
         this->UpdateGraphAttributesAuthors(this->graph, new_node, author_id);
       }
 
+      int explicit_cluster_id = -1;
+      if (this->planted_nodes_line_number_map.contains(weight_span_index) &&
+          this->planted_cluster_id_vec[weight_span_index] != -1) {
+        explicit_cluster_id = this->planted_cluster_id_vec[weight_span_index];
+      }
+
       double new_node_non_random_draw =
           non_random_generator_uniform_distribution(generator);
       // if author part of cartel, pick randomly from cartel list
@@ -956,19 +972,19 @@ void ABM::RunSimulationLoop() {
             this->GetCartelGeneratorNodes(this->graph, author_id);
         std::vector<int> generator_nodes =
             this->GetGeneratorNodesFromSet(cartel_generator_nodes);
-        this->UpdateGraphAttributesGeneratorNodes(this->graph, new_node,
-                                                  generator_nodes);
+        this->UpdateGraphAttributesGeneratorNodes(
+            this->graph, new_node, generator_nodes, explicit_cluster_id);
       } else if (new_node_non_random_draw <
                  this->non_random_generator_probability) {
         std::vector<int> generator_nodes =
             this->GetGeneratorNodesFromSet(eligible_generator_nodes);
-        this->UpdateGraphAttributesGeneratorNodes(this->graph, new_node,
-                                                  generator_nodes);
+        this->UpdateGraphAttributesGeneratorNodes(
+            this->graph, new_node, generator_nodes, explicit_cluster_id);
       } else {
         std::vector<int> generator_nodes = this->GetGeneratorNodes(
             this->graph, this->reverse_continuous_node_mapping);
-        this->UpdateGraphAttributesGeneratorNodes(this->graph, new_node,
-                                                  generator_nodes);
+        this->UpdateGraphAttributesGeneratorNodes(
+            this->graph, new_node, generator_nodes, explicit_cluster_id);
       }
     }
     this->logger.LogTime(current_year, "Pick generator nodes");

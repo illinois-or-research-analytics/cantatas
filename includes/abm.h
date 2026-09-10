@@ -105,6 +105,7 @@ public:
   std::vector<int> fitness_peak_value_vec;
   std::vector<int> fitness_peak_duration_vec;
   std::vector<int> planted_author_id_vec;
+  std::vector<int> planted_cluster_id_vec;
 
 public:
   ABM(const SimulationConfig &config)
@@ -367,7 +368,8 @@ public:
                                        std::span<int> out_degree_span, int len);
   void
   UpdateGraphAttributesGeneratorNodes(Graph *graph, int new_node,
-                                      const std::vector<int> &generator_nodes);
+                                      const std::vector<int> &generator_nodes,
+                                      int explicit_cluster_id = -1);
   /*
   Input: Graph *graph, int new_node, int author_id
   Output: void
@@ -449,7 +451,8 @@ public:
                  std::span<int> fitness_peak_value_span,
                  std::span<int> fitness_peak_duration_span,
                  std::span<int> num_authors_span,
-                 std::span<int> planted_author_id_span);
+                 std::span<int> planted_author_id_span,
+                 std::span<int> planted_cluster_id_span);
 
   /*
   Input: Graph *graph, int author_id
