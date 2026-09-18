@@ -734,7 +734,9 @@ void ABM::InitializeSimulation() {
   this->graph =
       new Graph(this->edgelist, this->nodelist, this->start_from_checkpoint,
                 this->num_authors_bag, this->author_max_lifetime);
-  this->InitializeSeedFitness(this->graph);
+  if (!this->start_from_checkpoint) {
+    this->InitializeSeedFitness(this->graph);
+  }
   this->ReadCommunityAssignment();
   this->logger.WriteToLogFile("loaded this->graph", Log::info);
   /* node ids to continous integer from 0 */
