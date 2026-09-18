@@ -115,6 +115,14 @@ void Graph::ParseNodelist() {
           this->cartel_set.insert(cartel_id);
           this->SetCartelID(author, cartel_id);
         }
+        if (header_to_index_map.contains("cluster_id")) {
+          int cluster_id =
+              std::stoi(current_line[header_to_index_map["cluster_id"]]);
+          this->SetCommunityAssignment(integer_node, cluster_id);
+          if (cluster_id >= 0) {
+            this->AddNodeToCluster(integer_node, cluster_id);
+          }
+        }
         if (this->author_birth_year_map.contains(author)) {
           this->author_birth_year_map[author] =
               std::min(this->author_birth_year_map[author], integer_year);
