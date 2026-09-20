@@ -182,15 +182,48 @@ void LadyBugBidirectionalCSR::RecordDeltaBatch(int thread_id,
   }
 }
 
+void LadyBugBidirectionalCSR::Restore(size_t node_count, size_t edge_count) {
+  num_nodes_ = node_count;
+  num_edges_ = edge_count;
+  fwd_offsets_.SetSize(num_nodes_ + 1);
+  bwd_offsets_.SetSize(num_nodes_ + 1);
+  fwd_edges_.SetSize(num_edges_);
+  bwd_edges_.SetSize(num_edges_);
+}
+
+void LadyBugBidirectionalCSR::SetNodeCount(size_t count) {
+  if (count <= num_nodes_) return;
+  EnsureNodeCapacity(count);
+  while (num_nodes_ < count) {
+    fwd_offsets_[num_nodes_] = fwd_edges_.size();
+    bwd_offsets_[num_nodes_] = bwd_edges_.size();
+    num_nodes_++;
+  }
+  fwd_offsets_[num_nodes_] = fwd_edges_.size();
+  bwd_offsets_[num_nodes_] = bwd_edges_.size();
+  fwd_offsets_.SetSize(num_nodes_ + 1);
+  bwd_offsets_.SetSize(num_nodes_ + 1);
+}
+
 void LadyBugBidirectionalCSR::MergeAnnualDeltaBuffer() {
-  // 1. Calculate total delta count
+  // 1. Calculate total delta count and required node capacity
   size_t total_deltas = 0;
+  size_t required_nodes = num_nodes_;
   for (const auto &buf : thread_delta_buffers_) {
     total_deltas += buf.size();
+    for (const auto &d : buf) {
+      if (d.target >= 0) {
+        required_nodes = std::max(required_nodes, static_cast<size_t>(d.target + 1));
+      }
+    }
   }
 
   if (total_deltas == 0) {
     return;
+  }
+
+  if (required_nodes > num_nodes_) {
+    SetNodeCount(required_nodes);
   }
 
   // 2. Count delta incoming edges per node v

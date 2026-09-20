@@ -251,9 +251,10 @@ bool LadyBugDB::Recover(int target_year) {
               << manifest_.current_year << ") != target_year (" << target_year << ")\n";
   }
 
-  // Restore node counts from manifest
+  // Restore node and CSR counts from manifest
   if (manifest_.node_count > 0) {
     node_store_.SetNodeCount(manifest_.node_count);
+    csr_.Restore(manifest_.node_count, manifest_.edge_count);
   }
 
   return true;

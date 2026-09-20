@@ -40,6 +40,8 @@ public:
 
   size_t GetNodeCount() const noexcept { return num_nodes_; }
   size_t GetEdgeCount() const noexcept { return num_edges_; }
+  void SetNodeCount(size_t count);
+  void Restore(size_t node_count, size_t edge_count);
 
   // Forward CSR (u -> v)
   inline std::span<const int32_t> GetOutNeighbors(int u) const noexcept {

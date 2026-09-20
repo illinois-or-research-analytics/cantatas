@@ -16,6 +16,12 @@ else()
     find_package(Eigen3 REQUIRED)
     find_package(OpenMP REQUIRED)
 
+    find_package(MPI)
+    if(MPI_FOUND)
+        message(STATUS "MPI found: ${MPI_CXX_COMPILER}")
+        add_definitions(-DUSE_MPI)
+    endif()
+
     set(ABM_MAJOR_VERSION 7)
     set(ABM_MINOR_VERSION 0)
     set(ABM_PATCH_VERSION 4)
@@ -57,12 +63,20 @@ else()
         ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_db.cpp
     )
 
+    set(DISTRIBUTED_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/distributed/distributed_partitioner.cpp
+        ${CMAKE_SOURCE_DIR}/src/distributed/ghost_cell_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/distributed/actor_exchange.cpp
+        ${CMAKE_SOURCE_DIR}/src/distributed/cluster_coordinator.cpp
+    )
+
     #[[ Define the output binary ]]
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
     add_executable(abm
         ${SOURCE_MAIN}
         ${SOURCE_FILES}
         ${LADYBUG_SOURCES}
+        ${DISTRIBUTED_SOURCES}
         )
 
     #[[ Link libraries ]]
@@ -70,12 +84,15 @@ else()
     target_link_libraries(abm PUBLIC OpenMP::OpenMP_CXX)
     target_link_libraries(abm PUBLIC Eigen3::Eigen)
     target_link_libraries(abm PUBLIC external_header_libs)
+    if(MPI_FOUND)
+        target_link_libraries(abm PUBLIC MPI::MPI_CXX)
+    endif()
 
     target_include_directories(abm
         PUBLIC ${CMAKE_SOURCE_DIR}/includes
     )
 
-    #[[ LadyBugDB Unit Tests ]]
+    #[[ LadyBugDB & Distributed Unit Tests ]]
     enable_testing()
 
     add_executable(test_vose_alias tests/test_vose_alias.cpp ${CMAKE_SOURCE_DIR}/src/vose_alias.cpp ${CMAKE_SOURCE_DIR}/src/utils.cpp)
@@ -113,5 +130,21 @@ else()
     target_include_directories(test_ladybug_checkpoint PUBLIC ${CMAKE_SOURCE_DIR}/includes)
     add_test(NAME test_ladybug_checkpoint COMMAND test_ladybug_checkpoint)
 
+    add_executable(test_distributed_partitioner tests/test_distributed_partitioner.cpp ${LADYBUG_SOURCES} ${DISTRIBUTED_SOURCES} ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_distributed_partitioner PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    if(MPI_FOUND)
+        target_link_libraries(test_distributed_partitioner PUBLIC MPI::MPI_CXX)
+    endif()
+    target_include_directories(test_distributed_partitioner PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_distributed_partitioner COMMAND test_distributed_partitioner)
+
+    add_executable(test_distributed_exchange tests/test_distributed_exchange.cpp ${LADYBUG_SOURCES} ${DISTRIBUTED_SOURCES} ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_distributed_exchange PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    if(MPI_FOUND)
+        target_link_libraries(test_distributed_exchange PUBLIC MPI::MPI_CXX)
+    endif()
+    target_include_directories(test_distributed_exchange PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_distributed_exchange COMMAND test_distributed_exchange)
+    set_tests_properties(test_distributed_exchange PROPERTIES ENVIRONMENT "OMPI_MCA_pml=ob1;OMPI_MCA_btl=self,vader,tcp;UCX_TLS=sm,self,tcp;UCX_NET_DEVICES=all")
 
 endif("${CMAKE_BINARY_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
