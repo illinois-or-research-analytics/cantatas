@@ -4,6 +4,7 @@
 #include "ladybug_author_store.h"
 #include "ladybug_cluster_index.h"
 #include "ladybug_csr.h"
+#include "ladybug_journal.h"
 #include "ladybug_mmap.h"
 #include "ladybug_node_store.h"
 #include <string>
@@ -17,6 +18,7 @@ struct DBManifest {
   size_t node_count = 0;
   size_t edge_count = 0;
   int next_author_id = 0;
+  uint64_t last_commit_timestamp = 0;
   std::string status = "valid";
 };
 
@@ -27,6 +29,7 @@ struct DBManifest {
  * - LadyBugBidirectionalCSR (Forward & Backward CSR with annual superstep delta merge)
  * - LadyBugClusterIndex (Leiden community partition indexing)
  * - LadyBugAuthorStore (Author reputations and Lotka distribution)
+ * - LadyBugJournal (Transactional delta log & zero-bloat pruning)
  * - Zero-bloat atomic checkpointing & manifest recovery
  */
 class LadyBugDB {
@@ -55,7 +58,7 @@ public:
 
   // Checkpointing & Persistence
   void Checkpoint(int current_year);
-  bool Recover(int target_year);
+  bool Recover(int target_year = -1);
 
   // Bag sampling for author counts
   void ReadNumAuthorsBag(const std::string &bag_csv);
@@ -74,6 +77,9 @@ public:
   LadyBugAuthorStore &Authors() noexcept { return author_store_; }
   const LadyBugAuthorStore &Authors() const noexcept { return author_store_; }
 
+  LadyBugJournal &Journal() noexcept { return journal_; }
+  const LadyBugJournal &Journal() const noexcept { return journal_; }
+
   const std::string &GetDbDir() const noexcept { return db_dir_; }
   const DBManifest &GetManifest() const noexcept { return manifest_; }
 
@@ -86,6 +92,7 @@ private:
   LadyBugBidirectionalCSR csr_;
   LadyBugClusterIndex cluster_index_;
   LadyBugAuthorStore author_store_;
+  LadyBugJournal journal_;
 
   std::vector<int> num_authors_bag_vec_;
 

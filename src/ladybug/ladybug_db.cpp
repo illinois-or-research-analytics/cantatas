@@ -1,5 +1,6 @@
 #include "ladybug/ladybug_db.h"
 #include "utils.h"
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -22,6 +23,7 @@ LadyBugDB::LadyBugDB(LadyBugDB &&other) noexcept
       csr_(std::move(other.csr_)),
       cluster_index_(std::move(other.cluster_index_)),
       author_store_(std::move(other.author_store_)),
+      journal_(std::move(other.journal_)),
       num_authors_bag_vec_(std::move(other.num_authors_bag_vec_)) {}
 
 LadyBugDB &LadyBugDB::operator=(LadyBugDB &&other) noexcept {
@@ -34,6 +36,7 @@ LadyBugDB &LadyBugDB::operator=(LadyBugDB &&other) noexcept {
     csr_ = std::move(other.csr_);
     cluster_index_ = std::move(other.cluster_index_);
     author_store_ = std::move(other.author_store_);
+    journal_ = std::move(other.journal_);
     num_authors_bag_vec_ = std::move(other.num_authors_bag_vec_);
   }
   return *this;
@@ -52,6 +55,7 @@ void LadyBugDB::Open(const std::string &db_dir, MmapMode mode,
   csr_.Open(db_dir_ + "/graph", mode, initial_nodes, initial_edges);
   cluster_index_.Open(db_dir_ + "/clusters", mode);
   author_store_.Open(db_dir_ + "/authors", mode, author_max_lifetime);
+  journal_.Open(db_dir_ + "/delta_journal.bin", mode);
 
   LoadManifest();
 }
@@ -62,6 +66,7 @@ void LadyBugDB::Close() {
   csr_.Close();
   cluster_index_.Close();
   author_store_.Close();
+  journal_.Close();
 }
 
 void LadyBugDB::Sync(bool async) {
@@ -69,6 +74,7 @@ void LadyBugDB::Sync(bool async) {
   csr_.Sync(async);
   cluster_index_.Sync(async);
   author_store_.Sync(async);
+  journal_.Sync(async);
 }
 
 void LadyBugDB::ReadNumAuthorsBag(const std::string &bag_csv) {
@@ -136,7 +142,6 @@ void LadyBugDB::IngestSeedData(const std::string &nodelist_csv,
 
   // 4. Initialize Authorship
   if (!is_checkpoint) {
-    // Seed nodes: Assign authors sorted by year
     std::vector<std::pair<int, int>> node_years;
     node_years.reserve(node_store_.GetNodeCount());
     for (size_t u = 0; u < node_store_.GetNodeCount(); ++u) {
@@ -178,7 +183,6 @@ void LadyBugDB::IngestSeedData(const std::string &nodelist_csv,
       }
     }
   } else {
-    // Checkpoint ingestion: register existing authors
     for (size_t u = 0; u < node_store_.GetNodeCount(); ++u) {
       int auth = node_store_.GetAuthorId(u);
       int yr = node_store_.GetYear(u);
@@ -198,6 +202,9 @@ void LadyBugDB::IngestSeedData(const std::string &nodelist_csv,
   manifest_.node_count = node_store_.GetNodeCount();
   manifest_.edge_count = csr_.GetEdgeCount();
   manifest_.next_author_id = author_store_.GetNextAuthorId();
+  manifest_.last_commit_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count();
 
   Sync(false);
   SaveManifest();
@@ -210,7 +217,8 @@ void LadyBugDB::Checkpoint(int current_year) {
   // 2. Recompute author reputations
   author_store_.ComputeAuthorReputations(node_store_);
 
-  // 3. Sync memory pages to NVMe storage (msync)
+  // 3. Log commit to journal and sync
+  journal_.AppendCommit(current_year, node_store_.GetNodeCount(), csr_.GetEdgeCount());
   Sync(false);
 
   // 4. Update and atomically write manifest.json
@@ -218,16 +226,37 @@ void LadyBugDB::Checkpoint(int current_year) {
   manifest_.node_count = node_store_.GetNodeCount();
   manifest_.edge_count = csr_.GetEdgeCount();
   manifest_.next_author_id = author_store_.GetNextAuthorId();
+  manifest_.last_commit_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count();
   manifest_.status = "valid";
 
   SaveManifest();
+
+  // 5. Prune / reset delta journal on successful commit (zero-bloat)
+  journal_.Truncate();
 }
 
-bool LadyBugDB::Recover(int /*target_year*/) {
+bool LadyBugDB::Recover(int target_year) {
   if (!LoadManifest()) {
     return false;
   }
-  return manifest_.status == "valid";
+  if (manifest_.status != "valid") {
+    return false;
+  }
+
+  // If a target year is requested, verify match
+  if (target_year >= 0 && manifest_.current_year != target_year) {
+    std::cout << "[LadyBugDB::Recover] Warning: Manifest current_year ("
+              << manifest_.current_year << ") != target_year (" << target_year << ")\n";
+  }
+
+  // Restore node counts from manifest
+  if (manifest_.node_count > 0) {
+    node_store_.SetNodeCount(manifest_.node_count);
+  }
+
+  return true;
 }
 
 void LadyBugDB::SaveManifest() {
@@ -243,6 +272,7 @@ void LadyBugDB::SaveManifest() {
     << "  \"node_count\": " << manifest_.node_count << ",\n"
     << "  \"edge_count\": " << manifest_.edge_count << ",\n"
     << "  \"next_author_id\": " << manifest_.next_author_id << ",\n"
+    << "  \"last_commit_timestamp\": " << manifest_.last_commit_timestamp << ",\n"
     << "  \"status\": \"" << manifest_.status << "\"\n"
     << "}\n";
   f.close();
@@ -271,6 +301,9 @@ bool LadyBugDB::LoadManifest() {
     } else if (line.find("\"next_author_id\"") != std::string::npos) {
       size_t pos = line.find(':');
       if (pos != std::string::npos) manifest_.next_author_id = std::stoi(line.substr(pos + 1));
+    } else if (line.find("\"last_commit_timestamp\"") != std::string::npos) {
+      size_t pos = line.find(':');
+      if (pos != std::string::npos) manifest_.last_commit_timestamp = std::stoull(line.substr(pos + 1));
     } else if (line.find("\"status\"") != std::string::npos) {
       if (line.find("valid") != std::string::npos) manifest_.status = "valid";
     }

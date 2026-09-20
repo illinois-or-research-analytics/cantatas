@@ -44,6 +44,7 @@ else()
         ${CMAKE_SOURCE_DIR}/src/citation_engine.cpp
         ${CMAKE_SOURCE_DIR}/src/vose_alias.cpp
         ${CMAKE_SOURCE_DIR}/src/vectorized_scoring.cpp
+        ${CMAKE_SOURCE_DIR}/src/signal_supervisor.cpp
     )
     #[[ CONSTANTS END ]]
 
@@ -52,6 +53,7 @@ else()
         ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_csr.cpp
         ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_cluster_index.cpp
         ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_author_store.cpp
+        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_journal.cpp
         ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_db.cpp
     )
 
@@ -105,6 +107,11 @@ else()
     target_link_libraries(test_ladybug_db PUBLIC OpenMP::OpenMP_CXX external_header_libs)
     target_include_directories(test_ladybug_db PUBLIC ${CMAKE_SOURCE_DIR}/includes)
     add_test(NAME test_ladybug_db COMMAND test_ladybug_db)
+
+    add_executable(test_ladybug_checkpoint tests/test_ladybug_checkpoint.cpp ${LADYBUG_SOURCES} ${CMAKE_SOURCE_DIR}/src/signal_supervisor.cpp ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_ladybug_checkpoint PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    target_include_directories(test_ladybug_checkpoint PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_ladybug_checkpoint COMMAND test_ladybug_checkpoint)
 
 
 endif("${CMAKE_BINARY_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
