@@ -1,6 +1,8 @@
 #include "citation_engine.h"
+#include "fast_bitset.h"
 #include "neighborhood_search.h"
 #include "utils.h"
+#include "vectorized_scoring.h"
 #include "vose_alias.h"
 #include <algorithm>
 #include <iostream>
@@ -390,54 +392,27 @@ int CitationEngine::MakeCitations(
     return static_cast<int>(k);
   }
 
-  // Calculate component sums across candidates
-  double pa_sum = 0.0;
-  double fit_sum = 0.0;
-  double na_sum = 0.0;
-  double ar_sum = 0.0;
-
-  for (size_t i = 0; i < k; ++i) {
-    int candidate_node = candidate_nodes[i];
-    int continuous_node_id = ((size_t)candidate_node < continuous_node_mapping.size())
-                                 ? continuous_node_mapping[candidate_node]
-                                 : candidate_node;
-    const auto &c = metrics.components[continuous_node_id];
-    pa_sum += c.pa;
-    fit_sum += c.fit;
-    na_sum += c.na;
-    ar_sum += c.ar;
-  }
-
-  const double scaled_pa_w = (pa_sum > 0.0) ? (weights.pa_weight / pa_sum) : 0.0;
-  const double scaled_fit_w = (fit_sum > 0.0) ? (weights.fit_weight / fit_sum) : 0.0;
-  const double scaled_na_w = (na_sum > 0.0) ? (weights.num_authors_weight / na_sum) : 0.0;
-  const double scaled_ar_w = (ar_sum > 0.0) ? (weights.author_reputation_weight / ar_sum) : 0.0;
-
-  // Thread-local scratchpad vectors to avoid per-call heap allocations
-  thread_local std::vector<double> combined_weights;
+  thread_local ladybug::ScoringScratchpad score_scratch;
+  thread_local ladybug::VoseScratchpad vose_scratch;
+  thread_local ladybug::VoseAliasTable alias_table;
+  thread_local ladybug::FastBitset visited_tracker;
   thread_local std::vector<int> sampled_indices;
-  thread_local VoseAliasTable alias_table;
 
-  combined_weights.resize(k);
   sampled_indices.resize(actual_num_cited);
+  visited_tracker.Clear();
 
-  for (size_t i = 0; i < k; ++i) {
-    int candidate_node = candidate_nodes[i];
-    int continuous_node_id = ((size_t)candidate_node < continuous_node_mapping.size())
-                                 ? continuous_node_mapping[candidate_node]
-                                 : candidate_node;
-    const auto &c = metrics.components[continuous_node_id];
-    double score = c.pa * scaled_pa_w + c.fit * scaled_fit_w +
-                   c.na * scaled_na_w + c.ar * scaled_ar_w;
-    combined_weights[i] = (score > 0.0) ? score : 0.0;
-  }
+  std::span<double> cand_weights;
+  ladybug::VectorizedScoring::ComputeCandidateWeights(
+      candidate_nodes, continuous_node_mapping, metrics, weights,
+      score_scratch, cand_weights);
 
   pcg32 &generator = Utils::GetThreadLocalPRNG();
-  alias_table.Init(combined_weights);
+  alias_table.Init(cand_weights, vose_scratch);
 
-  int sampled_count = alias_table.SampleDistinct(
-      actual_num_cited, std::span<int>(sampled_indices.data(), actual_num_cited),
-      generator);
+  int sampled_count = alias_table.SampleWithoutReplacement(
+      static_cast<int>(actual_num_cited),
+      std::span<int>(sampled_indices.data(), actual_num_cited),
+      generator, visited_tracker);
 
   for (int i = 0; i < sampled_count; ++i) {
     citations[i] = candidate_nodes[sampled_indices[i]];

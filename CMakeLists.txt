@@ -42,6 +42,8 @@ else()
         ${CMAKE_SOURCE_DIR}/src/metrics_engine.cpp
         ${CMAKE_SOURCE_DIR}/src/neighborhood_search.cpp
         ${CMAKE_SOURCE_DIR}/src/citation_engine.cpp
+        ${CMAKE_SOURCE_DIR}/src/vose_alias.cpp
+        ${CMAKE_SOURCE_DIR}/src/vectorized_scoring.cpp
     )
     #[[ CONSTANTS END ]]
 
@@ -73,6 +75,16 @@ else()
 
     #[[ LadyBugDB Unit Tests ]]
     enable_testing()
+
+    add_executable(test_vose_alias tests/test_vose_alias.cpp ${CMAKE_SOURCE_DIR}/src/vose_alias.cpp ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_vose_alias PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    target_include_directories(test_vose_alias PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_vose_alias COMMAND test_vose_alias)
+
+    add_executable(test_vectorized_scoring tests/test_vectorized_scoring.cpp ${CMAKE_SOURCE_DIR}/src/vectorized_scoring.cpp ${CMAKE_SOURCE_DIR}/src/utils.cpp)
+    target_link_libraries(test_vectorized_scoring PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+    target_include_directories(test_vectorized_scoring PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+    add_test(NAME test_vectorized_scoring COMMAND test_vectorized_scoring)
 
     add_executable(test_ladybug_mmap tests/test_ladybug_mmap.cpp)
     target_link_libraries(test_ladybug_mmap PUBLIC OpenMP::OpenMP_CXX external_header_libs)
