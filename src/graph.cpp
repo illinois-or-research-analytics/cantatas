@@ -120,6 +120,7 @@ void Graph::ParseNodelist() {
       int integer_node = parse_int(current_line[node_id_idx]);
       int integer_year = (year_idx >= 0 && static_cast<size_t>(year_idx) < current_line.size())
                              ? parse_int(current_line[year_idx]) : 0;
+      this->AddNode(integer_node);
       this->SetYear(integer_node, integer_year);
       node_year_vec.push_back({integer_node, integer_year});
 
@@ -155,7 +156,14 @@ void Graph::ParseNodelist() {
           this->SetSampledNeighborhoodSize(integer_node, parse_int(current_line[sampled_nbr_idx]));
         }
         if (gen_node_str_idx >= 0 && static_cast<size_t>(gen_node_str_idx) < current_line.size()) {
-          this->SetGeneratorNodeString(integer_node, std::string(current_line[gen_node_str_idx]));
+          std::string_view sv = current_line[gen_node_str_idx];
+          if (sv.empty() || sv == "no_generators") {
+            this->SetGeneratorNode(integer_node, -1);
+          } else {
+            size_t pos = sv.find(';');
+            std::string_view first_gen = (pos == std::string_view::npos) ? sv : sv.substr(0, pos);
+            this->SetGeneratorNode(integer_node, parse_int(first_gen));
+          }
         }
         if (fully_rand_idx >= 0 && static_cast<size_t>(fully_rand_idx) < current_line.size()) {
           this->SetFullyRandomCitations(integer_node, parse_int(current_line[fully_rand_idx]));
@@ -576,9 +584,11 @@ void Graph::AddNode(int u) {
     return;
   }
   this->EnsureNodeCapacity(u);
-  if (!this->node_attributes[u].is_valid) {
+  if (!this->node_exists_[u]) {
+    this->node_exists_[u] = 1;
+    this->node_list_.push_back(u);
+    this->node_count_++;
     this->node_attributes[u].is_valid = true;
-    this->node_set.insert(u);
   }
 }
 
@@ -586,7 +596,9 @@ void Graph::ReleaseHeavyStructures() {
   std::vector<std::vector<int>>().swap(this->forward_adj_list);
   std::vector<std::vector<int>>().swap(this->backward_adj_list);
   std::vector<NodeAttributes>().swap(this->node_attributes);
-  std::set<int>().swap(this->node_set);
+  std::vector<int>().swap(this->node_list_);
+  std::vector<uint8_t>().swap(this->node_exists_);
+  this->node_count_ = 0;
   std::unordered_map<int, std::vector<int>>().swap(this->cluster_nodes_map);
   std::unordered_map<int, std::vector<int>>().swap(this->author_publication_map);
   std::unordered_map<int, std::vector<int>>().swap(this->publication_count_to_author_map);
@@ -607,33 +619,22 @@ int Graph::GetNextAuthorId() const noexcept {
   return this->next_author_id;
 }
 
-const std::string &Graph::GetGeneratorNodeString(int node) const {
-  if (db_) {
-    int gen = db_->Nodes().GetGeneratorNode(node);
-    if (gen < 0) {
-      static const std::string no_gen = "no_generators";
-      return no_gen;
-    }
-    thread_local std::string gen_str;
-    gen_str = std::to_string(gen);
-    return gen_str;
+std::string Graph::GetGeneratorNodeString(int node) const {
+  int gen = this->GetGeneratorNode(node);
+  if (gen < 0) {
+    return "no_generators";
   }
-  return this->node_attributes[node].generator_node_string;
+  return std::to_string(gen);
 }
 
 void Graph::SetGeneratorNodeString(int node, const std::string &val) {
-  if (db_) {
-    if (val.empty() || val == "no_generators") {
-      db_->Nodes().SetGeneratorNode(node, -1);
-    } else {
-      size_t pos = val.find(';');
-      int gen = std::stoi((pos == std::string::npos) ? val : val.substr(0, pos));
-      db_->Nodes().SetGeneratorNode(node, gen);
-    }
-    return;
+  if (val.empty() || val == "no_generators") {
+    this->SetGeneratorNode(node, -1);
+  } else {
+    size_t pos = val.find(';');
+    int gen = std::stoi((pos == std::string::npos) ? val : val.substr(0, pos));
+    this->SetGeneratorNode(node, gen);
   }
-  EnsureNodeCapacity(node);
-  this->node_attributes[node].generator_node_string = val;
 }
 
 void Graph::PrintGraph() const {

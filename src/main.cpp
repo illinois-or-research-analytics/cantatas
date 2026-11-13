@@ -1,3 +1,4 @@
+#include <filesystem>
 #include <iostream>
 
 #include "INIReader.h"
@@ -225,6 +226,14 @@ int main(int argc, char *argv[]) {
   }
   if (main_program.is_used("--db-path") && !main_program.get<std::string>("--db-path").empty()) {
     db_path = main_program.get<std::string>("--db-path");
+  }
+
+  // If db_path is default or points to /tmp, redirect to /scratch/$USER/ladybug_data if available
+  const char *user_env = std::getenv("USER");
+  if (user_env && std::filesystem::exists(std::string("/scratch/") + user_env)) {
+    if (db_path == "./ladybug_data" || db_path.empty() || db_path.starts_with("/tmp/")) {
+      db_path = std::string("/scratch/") + user_env + "/ladybug_data";
+    }
   }
 
   if (coordinator.GetWorldSize() > 1) {

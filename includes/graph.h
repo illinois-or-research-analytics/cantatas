@@ -35,7 +35,7 @@ public:
     int assigned_out_degree = -1;
     int planted_nodes_line_number = -1;
     int sampled_neighborhood_size = -1;
-    std::string generator_node_string = "no_generators";
+    int generator_node = -1;
     int fully_random_citations = -1;
     int author_id = -1;
     int initial_author_reputation = -1;
@@ -117,7 +117,7 @@ public:
     if (db_) {
       return db_->Nodes().GetNodeCount();
     }
-    return node_set.size();
+    return node_count_;
   }
 
   inline bool HasNode(int node) const noexcept {
@@ -125,7 +125,7 @@ public:
     if (db_) {
       return static_cast<size_t>(node) < db_->Nodes().GetNodeCount();
     }
-    return IsNodeValid(node);
+    return static_cast<size_t>(node) < node_exists_.size() && node_exists_[node];
   }
 
   inline std::span<const int32_t> GetOutNeighbors(int u) const noexcept {
@@ -152,7 +152,7 @@ public:
     return {};
   }
 
-  inline const std::set<int> &GetNodeSet() const { return node_set; }
+  inline const std::vector<int> &GetNodeSet() const noexcept { return node_list_; }
   inline const std::vector<std::vector<int>> &GetForwardAdjList() const { return forward_adj_list; }
   inline const std::vector<std::vector<int>> &GetBackwardAdjList() const { return backward_adj_list; }
   /*
@@ -388,7 +388,20 @@ public:
     node_attributes[node].sampled_neighborhood_size = val;
   }
 
-  const std::string &GetGeneratorNodeString(int node) const;
+  inline int GetGeneratorNode(int node) const {
+    if (db_) return db_->Nodes().GetGeneratorNode(node);
+    return node_attributes[node].generator_node;
+  }
+  inline void SetGeneratorNode(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetGeneratorNode(node, val);
+      return;
+    }
+    EnsureNodeCapacity(node);
+    node_attributes[node].generator_node = val;
+  }
+
+  std::string GetGeneratorNodeString(int node) const;
   void SetGeneratorNodeString(int node, const std::string &val);
 
   inline int GetCommunityAssignment(int node) const {
@@ -630,7 +643,9 @@ public:
 
 private:
   ladybug::LadyBugDB *db_ = nullptr;
-  std::set<int> node_set;
+  size_t node_count_ = 0;
+  std::vector<int> node_list_;
+  std::vector<uint8_t> node_exists_;
   std::string edgelist;
   std::string nodelist;
   std::set<int> cartel_set;
@@ -661,6 +676,7 @@ protected:
       node_attributes.resize(new_size);
       forward_adj_list.resize(new_size);
       backward_adj_list.resize(new_size);
+      node_exists_.resize(new_size, 0);
     }
   }
   std::unordered_map<int, int> author_cartel_map;

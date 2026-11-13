@@ -297,15 +297,9 @@ void ABM::UpdateGraphAttributesOutDegrees(Graph *graph, int next_node_id,
 
 std::vector<int> ABM::GetGraphAttributesGeneratorNodes(Graph *graph,
                                                        int new_node) const {
-  std::vector<int> generator_nodes;
-  const std::string &generator_node_string =
-      graph->GetGeneratorNodeString(new_node);
-  std::stringstream ss(generator_node_string);
-  std::string current_value;
-  while (std::getline(ss, current_value, ';')) {
-    generator_nodes.push_back(std::stoi(current_value));
-  }
-  return generator_nodes;
+  int gen = graph->GetGeneratorNode(new_node);
+  if (gen >= 0) return {gen};
+  return {};
 }
 
 void ABM::UpdateGraphAttributesAuthors(Graph *graph, int new_node,
@@ -317,19 +311,12 @@ void ABM::UpdateGraphAttributesAuthors(Graph *graph, int new_node,
 void ABM::UpdateGraphAttributesGeneratorNodes(
     Graph *graph, int new_node, const std::vector<int> &generator_nodes,
     int explicit_cluster_id) {
-  std::string generator_node_string;
+  int gen = generator_nodes.empty() ? -1 : generator_nodes[0];
   int cluster_id = explicit_cluster_id;
-  if (!generator_nodes.empty()) {
-    generator_node_string += std::to_string(generator_nodes.at(0));
-    if (cluster_id < 0) {
-      cluster_id = graph->GetCommunityAssignment(generator_nodes.at(0));
-    }
-    for (size_t i = 1; i < generator_nodes.size(); i++) {
-      generator_node_string += ";";
-      generator_node_string += std::to_string(generator_nodes.at(i));
-    }
+  if (cluster_id < 0 && gen >= 0) {
+    cluster_id = graph->GetCommunityAssignment(gen);
   }
-  graph->SetGeneratorNodeString(new_node, generator_node_string);
+  graph->SetGeneratorNode(new_node, gen);
   graph->SetCommunityAssignment(new_node, cluster_id);
   if (cluster_id >= 0) {
     graph->AddNodeToCluster(new_node, cluster_id);
@@ -1113,8 +1100,7 @@ void ABM::RunSimulationLoop() {
           int n = new_nodes_vec[i];
           cluster_ids[i] = this->graph->GetCommunityAssignment(n);
           author_ids[i] = this->graph->GetAuthorId(n);
-          auto gen_vec = this->GetGraphAttributesGeneratorNodes(this->graph, n);
-          primary_gen_nodes[i] = gen_vec.empty() ? -1 : gen_vec[0];
+          primary_gen_nodes[i] = this->graph->GetGeneratorNode(n);
 
           int continuous_id = ((size_t)n < this->continuous_node_mapping.size())
                                   ? this->continuous_node_mapping[n]
@@ -1170,19 +1156,22 @@ void ABM::RunSimulationLoop() {
             this->graph->AddNodeToCluster(n, cluster_ids[i]);
           }
           if (primary_gen_nodes[i] >= 0) {
-            this->graph->SetGeneratorNodeString(n, std::to_string(primary_gen_nodes[i]));
+            this->graph->SetGeneratorNode(n, primary_gen_nodes[i]);
           }
         }
       }
     }
 
     // Tally clusters and count of new agents added by this compute node
+    std::vector<size_t> local_agent_indices;
+    local_agent_indices.reserve(new_nodes_vec.size() / (this->coordinator.IsMPIEnabled() ? this->coordinator.GetWorldSize() : 1));
     std::map<int, int> local_cluster_new_agents;
     int local_new_agents_count = 0;
     for (size_t i = 0; i < new_nodes_vec.size(); i++) {
       int new_node = new_nodes_vec[i];
       int cluster_id = this->graph->GetCommunityAssignment(new_node);
       if (!this->coordinator.IsMPIEnabled() || this->partitioner.IsLocalClusterOrNode(cluster_id, new_node)) {
+        local_agent_indices.push_back(i);
         local_cluster_new_agents[cluster_id]++;
         local_new_agents_count++;
       }
@@ -1284,16 +1273,13 @@ void ABM::RunSimulationLoop() {
     }
 
     std::vector<std::pair<std::string, int>> parallel_stage_time_vec;
-#pragma omp parallel for reduction(custom_merge_vec_int : new_edges_vec)       \
+#pragma omp parallel for schedule(dynamic, 64)                                 \
+    reduction(custom_merge_vec_int : new_edges_vec)                           \
     reduction(merge_str_int_pair_vecs : parallel_stage_time_vec)
-    for (size_t i = 0; i < new_nodes_vec.size(); i++) {
+    for (size_t k = 0; k < local_agent_indices.size(); k++) {
+      size_t i = local_agent_indices[k];
       int new_node = new_nodes_vec[i];
       int cluster_id = this->graph->GetCommunityAssignment(new_node);
-
-      // Distributed Partitioning: only simulate citations for agents belonging to this compute node's clusters
-      if (this->coordinator.IsMPIEnabled() && !this->partitioner.IsLocalClusterOrNode(cluster_id, new_node)) {
-        continue;
-      }
 
       int thread_id = omp_get_thread_num();
       std::chrono::time_point<std::chrono::steady_clock> local_prev_time =
@@ -1751,12 +1737,10 @@ void ABM::RunSimulationLoop() {
         }
       }
 
-      for (size_t i = 0; i < new_nodes_vec.size(); i++) {
+      for (size_t k = 0; k < local_agent_indices.size(); k++) {
+        size_t i = local_agent_indices[k];
         int new_node = new_nodes_vec[i];
         int cluster_id = this->graph->GetCommunityAssignment(new_node);
-        if (this->coordinator.IsMPIEnabled() && !this->partitioner.IsLocalClusterOrNode(cluster_id, new_node)) {
-          continue;
-        }
 
         int weight_span_index = this->continuous_node_mapping[new_node] - this->initial_graph_size;
         int offset = new_node - min_new_node;

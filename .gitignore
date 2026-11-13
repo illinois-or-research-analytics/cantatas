@@ -7,3 +7,5 @@ bin/
 compile_commands.json
 external_libs/*
 !external_libs/CMakeLists.txt
+abm
+scratch_folder

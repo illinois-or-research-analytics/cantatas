@@ -55,10 +55,10 @@ void ClusterCoordinator::Init(int &argc, char **&argv) {
   //    - MPI_Comm_size(MPI_COMM_WORLD, &world_size_);
   // 5. mpi_enabled_ = (world_size_ > 1);
 #if DISTRIBUTED_HAS_MPI
-  setenv("OMPI_MCA_pml", "ob1", 1);
-  setenv("OMPI_MCA_btl", "self,vader,tcp", 1);
-  setenv("UCX_TLS", "sm,self,tcp", 1);
-  setenv("UCX_NET_DEVICES", "all", 1);
+  setenv("OMPI_MCA_pml", "ob1", 0);
+  setenv("OMPI_MCA_btl", "self,vader,tcp", 0);
+  setenv("UCX_TLS", "sm,self,tcp", 0);
+  setenv("UCX_NET_DEVICES", "all", 0);
 
   bool in_mpi_env = (getenv("OMPI_COMM_WORLD_SIZE") != nullptr ||
                      getenv("PMIX_RANK") != nullptr ||
