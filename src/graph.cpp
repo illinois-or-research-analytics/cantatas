@@ -2,6 +2,9 @@
 #include "utils.h"
 #include <charconv>
 #include <string_view>
+#if defined(__linux__)
+#include <malloc.h>
+#endif
 
 Graph::Graph(std::string edgelist, std::string nodelist,
              bool start_from_checkpoint, std::string num_authors_bag,
@@ -250,14 +253,26 @@ void Graph::ParseNodelist() {
   }
 }
 
-std::set<int> Graph::GetCartelSet() const { return this->cartel_set; }
+std::set<int> Graph::GetCartelSet() const {
+  if (db_) {
+    return db_->Authors().GetCartelSet();
+  }
+  return this->cartel_set;
+}
 
 void Graph::SetCartelID(int author, int cartel_id) {
+  if (db_) {
+    db_->Authors().SetCartelID(author, cartel_id);
+    return;
+  }
   this->author_cartel_map[author] = cartel_id;
   this->cartel_author_map[cartel_id].insert(author);
 }
 
 std::set<int> Graph::GetCartelAuthors(int cartel_id) const {
+  if (db_) {
+    return db_->Authors().GetCartelAuthors(cartel_id);
+  }
   if (cartel_id == -1) {
     return std::set<int>();
   }
@@ -265,6 +280,9 @@ std::set<int> Graph::GetCartelAuthors(int cartel_id) const {
 }
 
 std::vector<int> Graph::GetAuthorPublications(int author_id) const {
+  if (db_) {
+    return db_->Authors().GetAuthorPublications(author_id);
+  }
   static const std::vector<int> empty_vec;
   if (!this->author_publication_map.contains(author_id)) {
     return empty_vec;
@@ -273,6 +291,9 @@ std::vector<int> Graph::GetAuthorPublications(int author_id) const {
 }
 
 int Graph::GetCartelID(int author) const {
+  if (db_) {
+    return db_->Authors().GetCartelID(author);
+  }
   if (this->author_cartel_map.contains(author)) {
     return this->author_cartel_map.at(author);
   }
@@ -280,10 +301,18 @@ int Graph::GetCartelID(int author) const {
 }
 
 void Graph::UpdateAuthorPublicationMap(int author, int node) {
+  if (db_) {
+    db_->Authors().UpdateAuthorPublication(author, node);
+    return;
+  }
   this->author_publication_map[author].push_back(node);
 }
 
 void Graph::ComputeAuthorReputations() {
+  if (db_) {
+    db_->Authors().ComputeAuthorReputations(db_->CSR());
+    return;
+  }
   std::vector<int> freq;
   for (const auto &[author_id, birth_year] : this->author_birth_year_map) {
     auto it = this->author_publication_map.find(author_id);
@@ -319,6 +348,9 @@ void Graph::ComputeAuthorReputations() {
 }
 
 int Graph::ComputeSingleAuthorReputation(int author_id) {
+  if (db_) {
+    return db_->Authors().ComputeSingleAuthorReputation(author_id, db_->CSR());
+  }
   auto it = this->author_publication_map.find(author_id);
   if (it == this->author_publication_map.end() || it->second.empty()) {
     this->author_reputation_map[author_id] = 0;
@@ -342,6 +374,14 @@ int Graph::ComputeSingleAuthorReputation(int author_id) {
 }
 
 void Graph::SaveInitialAuthorReputations() {
+  if (db_) {
+    size_t n = db_->Nodes().GetNodeCount();
+    for (size_t node_id = 0; node_id < n; ++node_id) {
+      int auth = db_->Nodes().GetAuthorId(static_cast<int>(node_id));
+      db_->Nodes().SetInitialAuthorReputation(static_cast<int>(node_id), db_->Authors().GetAuthorReputation(auth));
+    }
+    return;
+  }
   for (const auto &node_id : this->GetNodeSet()) {
     int author_id = this->GetAuthorId(node_id);
     auto it = this->author_reputation_map.find(author_id);
@@ -350,6 +390,10 @@ void Graph::SaveInitialAuthorReputations() {
 }
 
 int Graph::GetAuthorReputationForNode(int node) const {
+  if (db_) {
+    int auth = db_->Nodes().GetAuthorId(node);
+    return db_->Authors().GetAuthorReputation(auth);
+  }
   int author_id = this->GetAuthorId(node);
   auto it = this->author_reputation_map.find(author_id);
   if (it != this->author_reputation_map.end()) {
@@ -400,6 +444,10 @@ void Graph::ReadNumAuthorsBag() {
 }
 
 void Graph::UpdateAuthorManual(int author_id) {
+  if (db_) {
+    db_->Authors().UpdateAuthorManual(author_id);
+    return;
+  }
   int num_publications_by_author =
       this->author_publication_map.contains(author_id)
           ? this->author_publication_map.at(author_id).size()
@@ -415,6 +463,9 @@ void Graph::UpdateAuthorManual(int author_id) {
 }
 
 int Graph::GetNextAuthor(int current_year, const std::set<int> &exclusion_set) {
+  if (db_) {
+    return db_->Authors().GetNextAuthor(current_year, exclusion_set);
+  }
   int num_authors_with_one_paper =
       this->publication_count_to_author_map[1].size();
   bool found_valid_place = false;
@@ -507,6 +558,9 @@ int Graph::GetNextAuthor(int current_year, const std::set<int> &exclusion_set) {
 }
 
 void Graph::AddEdge(std::pair<int, int> edge) {
+  if (db_) {
+    return;
+  }
   this->EnsureNodeCapacity(edge.first);
   this->forward_adj_list[edge.first].push_back(edge.second);
   this->SetOutDegree(edge.first, this->GetOutDegree(edge.first) + 1);
@@ -518,11 +572,68 @@ void Graph::AddEdge(std::pair<int, int> edge) {
 }
 
 void Graph::AddNode(int u) {
+  if (db_) {
+    return;
+  }
   this->EnsureNodeCapacity(u);
   if (!this->node_attributes[u].is_valid) {
     this->node_attributes[u].is_valid = true;
     this->node_set.insert(u);
   }
+}
+
+void Graph::ReleaseHeavyStructures() {
+  std::vector<std::vector<int>>().swap(this->forward_adj_list);
+  std::vector<std::vector<int>>().swap(this->backward_adj_list);
+  std::vector<NodeAttributes>().swap(this->node_attributes);
+  std::set<int>().swap(this->node_set);
+  std::unordered_map<int, std::vector<int>>().swap(this->cluster_nodes_map);
+  std::unordered_map<int, std::vector<int>>().swap(this->author_publication_map);
+  std::unordered_map<int, std::vector<int>>().swap(this->publication_count_to_author_map);
+  std::unordered_map<int, int>().swap(this->author_birth_year_map);
+  std::unordered_map<int, int>().swap(this->author_reputation_map);
+  std::unordered_map<int, int>().swap(this->author_cartel_map);
+  std::unordered_map<int, std::set<int>>().swap(this->cartel_author_map);
+  std::set<int>().swap(this->cartel_set);
+#if defined(__linux__)
+  malloc_trim(0);
+#endif
+}
+
+int Graph::GetNextAuthorId() const noexcept {
+  if (db_) {
+    return db_->Authors().GetNextAuthorId();
+  }
+  return this->next_author_id;
+}
+
+const std::string &Graph::GetGeneratorNodeString(int node) const {
+  if (db_) {
+    int gen = db_->Nodes().GetGeneratorNode(node);
+    if (gen < 0) {
+      static const std::string no_gen = "no_generators";
+      return no_gen;
+    }
+    thread_local std::string gen_str;
+    gen_str = std::to_string(gen);
+    return gen_str;
+  }
+  return this->node_attributes[node].generator_node_string;
+}
+
+void Graph::SetGeneratorNodeString(int node, const std::string &val) {
+  if (db_) {
+    if (val.empty() || val == "no_generators") {
+      db_->Nodes().SetGeneratorNode(node, -1);
+    } else {
+      size_t pos = val.find(';');
+      int gen = std::stoi((pos == std::string::npos) ? val : val.substr(0, pos));
+      db_->Nodes().SetGeneratorNode(node, gen);
+    }
+    return;
+  }
+  EnsureNodeCapacity(node);
+  this->node_attributes[node].generator_node_string = val;
 }
 
 void Graph::PrintGraph() const {
@@ -537,6 +648,10 @@ void Graph::PrintGraph() const {
 }
 
 void Graph::WriteGraph(std::string output_file) const {
+  if (db_) {
+    db_->CSR().ExportCSV(output_file);
+    return;
+  }
   std::ofstream output_filehandle(output_file);
   output_filehandle << "source,target\n";
   for (size_t u = 0; u < this->GetForwardAdjList().size(); u++) {
@@ -559,6 +674,68 @@ void Graph::WriteAttributes(std::string auxiliary_information_file) const {
          "number,generator_node_string,sampled_neighborhood_size,fully_random_"
          "citations,author_id,num_authors,initial_author_reputation,final_"
          "author_reputation,cartel_id,cluster_id\n";
+
+  if (db_) {
+    size_t n = db_->Nodes().GetNodeCount();
+    for (size_t i = 0; i < n; ++i) {
+      int node_id = static_cast<int>(i);
+      std::string node_type =
+          (db_->Nodes().GetType(node_id) == ladybug::NodeType::Seed ? "seed" : "agent");
+      int year = db_->Nodes().GetYear(node_id);
+      double pa_weight = -1;
+      double fit_weight = -1;
+      double num_authors_weight = -1;
+      double author_reputation_weight = -1;
+      double alpha = -1;
+      int fit_lag_duration = db_->Nodes().GetFitnessLagDuration(node_id);
+      int fit_peak_value = db_->Nodes().GetFitnessPeakValue(node_id);
+      int fit_peak_duration = db_->Nodes().GetFitnessPeakDuration(node_id);
+      int out_degree = static_cast<int>(db_->CSR().GetOutDegree(node_id));
+      int assigned_out_degree = -1;
+      int in_degree = static_cast<int>(db_->CSR().GetInDegree(node_id));
+      int author = db_->Nodes().GetAuthorId(node_id);
+      int num_authors = db_->Nodes().GetNumAuthors(node_id);
+      int planted_nodes_line_number = -1;
+      std::string generator_node_string = "no_generators";
+      int neighborhood_size = -1;
+      int fully_random_citations = -1;
+      int initial_author_reputation = db_->Nodes().GetInitialAuthorReputation(node_id);
+      int final_author_reputation = db_->Authors().GetAuthorReputation(author);
+      int cartel_id = db_->Authors().GetCartelID(author);
+      int cluster_id = db_->Nodes().GetClusterId(node_id);
+
+      if (db_->Nodes().GetType(node_id) != ladybug::NodeType::Seed) {
+        alpha = db_->Nodes().GetAlpha(node_id);
+        pa_weight = db_->Nodes().GetPaWeight(node_id);
+        fit_weight = db_->Nodes().GetFitWeight(node_id);
+        num_authors_weight = db_->Nodes().GetNumAuthorsWeight(node_id);
+        author_reputation_weight = db_->Nodes().GetAuthorRepWeight(node_id);
+        assigned_out_degree = db_->Nodes().GetAssignedOutDegree(node_id);
+        int gen = db_->Nodes().GetGeneratorNode(node_id);
+        if (gen >= 0) {
+          generator_node_string = std::to_string(gen);
+        }
+        planted_nodes_line_number = db_->Nodes().GetPlantedLineNumber(node_id);
+        neighborhood_size = db_->Nodes().GetSampledNeighborhoodSize(node_id);
+        fully_random_citations = db_->Nodes().GetFullyRandomCitations(node_id);
+      }
+
+      auxiliary_information_filehandle
+          << node_id << "," << node_type << "," << year << "," << alpha << ","
+          << pa_weight << "," << fit_weight << "," << num_authors_weight << ","
+          << author_reputation_weight << "," << fit_lag_duration << ","
+          << fit_peak_value << "," << fit_peak_duration << "," << in_degree << ","
+          << out_degree << "," << assigned_out_degree << ","
+          << planted_nodes_line_number << "," << generator_node_string << ","
+          << neighborhood_size << "," << fully_random_citations << "," << author
+          << "," << num_authors << "," << initial_author_reputation << ","
+          << final_author_reputation << "," << cartel_id << "," << cluster_id
+          << "\n";
+    }
+    auxiliary_information_filehandle.close();
+    return;
+  }
+
   for (const auto &node_id : this->GetNodeSet()) {
     std::string node_type =
         (this->GetType(node_id) == NodeType::Seed ? "seed" : "agent");
@@ -615,11 +792,18 @@ void Graph::WriteAttributes(std::string auxiliary_information_file) const {
 
 void Graph::AddNodeToCluster(int node, int cluster_id) {
   if (cluster_id >= 0) {
+    if (db_) {
+      db_->Clusters().AddNodeToCluster(node, cluster_id);
+      return;
+    }
     this->cluster_nodes_map[cluster_id].push_back(node);
   }
 }
 
 const std::vector<int> &Graph::GetClusterNodes(int cluster_id) const {
+  if (db_) {
+    return db_->Clusters().GetClusterNodes(cluster_id);
+  }
   static const std::vector<int> empty_cluster;
   auto it = this->cluster_nodes_map.find(cluster_id);
   if (it != this->cluster_nodes_map.end()) {
@@ -629,6 +813,9 @@ const std::vector<int> &Graph::GetClusterNodes(int cluster_id) const {
 }
 
 int Graph::GetClusterSize(int cluster_id, int current_year) const {
+  if (db_) {
+    return db_->Clusters().GetClusterSize(cluster_id, db_->Nodes(), current_year);
+  }
   auto it = this->cluster_nodes_map.find(cluster_id);
   if (it != this->cluster_nodes_map.end()) {
     if (current_year == -1) {

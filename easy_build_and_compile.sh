@@ -6,5 +6,5 @@ cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 # cmake -DCMAKE_BUILD_TYPE=Debug ..
 cp compile_commands.json ../
-make -j 1
+make -j 32
 ln -s $(readlink -f ./bin/abm) ../abm

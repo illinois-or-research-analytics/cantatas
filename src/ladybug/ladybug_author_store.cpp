@@ -198,6 +198,38 @@ void LadyBugAuthorStore::ComputeAuthorReputations(const LadyBugNodeStore &node_s
   }
 }
 
+void LadyBugAuthorStore::ComputeAuthorReputations(const LadyBugBidirectionalCSR &csr) {
+  std::vector<int> freq;
+  for (const auto &[author_id, birth_year] : author_birth_year_map_) {
+    auto it = author_publication_map_.find(author_id);
+    if (it == author_publication_map_.end()) {
+      author_reputation_map_[author_id] = 0;
+      continue;
+    }
+    const auto &publications = it->second;
+    int h_index = 0;
+    if (!publications.empty()) {
+      size_t n = publications.size();
+      if (freq.size() <= n) {
+        freq.resize(n + 1, 0);
+      } else {
+        std::fill(freq.begin(), freq.begin() + n + 1, 0);
+      }
+      for (int node : publications) {
+        size_t deg = csr.GetInDegree(node);
+        freq[std::min(n, deg)]++;
+      }
+      h_index = static_cast<int>(n);
+      int num_cand = freq[h_index];
+      while (h_index > num_cand) {
+        h_index--;
+        num_cand += freq[h_index];
+      }
+    }
+    author_reputation_map_[author_id] = h_index;
+  }
+}
+
 int LadyBugAuthorStore::ComputeSingleAuthorReputation(int author_id, const LadyBugNodeStore &node_store) {
   auto it = author_publication_map_.find(author_id);
   if (it == author_publication_map_.end() || it->second.empty()) {
@@ -209,6 +241,29 @@ int LadyBugAuthorStore::ComputeSingleAuthorReputation(int author_id, const LadyB
   std::vector<int> freq(n + 1, 0);
   for (int node : publications) {
     size_t deg = node_store.GetInDegree(node);
+    freq[std::min(n, deg)]++;
+  }
+  int h_index = static_cast<int>(n);
+  int num_cand = freq[h_index];
+  while (h_index > num_cand) {
+    h_index--;
+    num_cand += freq[h_index];
+  }
+  author_reputation_map_[author_id] = h_index;
+  return h_index;
+}
+
+int LadyBugAuthorStore::ComputeSingleAuthorReputation(int author_id, const LadyBugBidirectionalCSR &csr) {
+  auto it = author_publication_map_.find(author_id);
+  if (it == author_publication_map_.end() || it->second.empty()) {
+    author_reputation_map_[author_id] = 0;
+    return 0;
+  }
+  const auto &publications = it->second;
+  size_t n = publications.size();
+  std::vector<int> freq(n + 1, 0);
+  for (int node : publications) {
+    size_t deg = csr.GetInDegree(node);
     freq[std::min(n, deg)]++;
   }
   int h_index = static_cast<int>(n);

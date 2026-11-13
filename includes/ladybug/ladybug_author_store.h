@@ -35,7 +35,9 @@ public:
   int GetAuthorBirthYear(int author_id) const;
 
   void ComputeAuthorReputations(const LadyBugNodeStore &node_store);
+  void ComputeAuthorReputations(const LadyBugBidirectionalCSR &csr);
   int ComputeSingleAuthorReputation(int author_id, const LadyBugNodeStore &node_store);
+  int ComputeSingleAuthorReputation(int author_id, const LadyBugBidirectionalCSR &csr);
   int GetAuthorReputation(int author_id) const;
 
   void SetAuthorPublicationMap(std::unordered_map<int, std::vector<int>> map) {

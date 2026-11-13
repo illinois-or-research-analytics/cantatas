@@ -47,20 +47,23 @@ int CitationEngine::MakeUniformRandomCitationsFromGraph(
   for (size_t i = 0; i < generator_nodes.size(); i++) {
     selected.insert(generator_nodes.at(i));
   }
-  if ((int)graph->GetNodeSet().size() - (int)selected.size() <= num_citations) {
-    actual_num_cited = (int)graph->GetNodeSet().size() - (int)selected.size();
+  size_t total_nodes = graph->GetNodeCount();
+  if ((int)total_nodes - (int)selected.size() <= num_citations) {
+    actual_num_cited = (int)total_nodes - (int)selected.size();
     int current_citation_index = 0;
-    for (auto const &node_id : graph->GetNodeSet()) {
-      if (!selected.contains(node_id)) {
-        citations[num_cited_so_far + current_citation_index] = node_id;
-        selected.insert(node_id);
+    for (size_t node_id = 0; node_id < total_nodes; ++node_id) {
+      int u = static_cast<int>(node_id);
+      if (!graph->HasNode(u)) continue;
+      if (!selected.contains(u)) {
+        citations[num_cited_so_far + current_citation_index] = u;
+        selected.insert(u);
         current_citation_index++;
       }
     }
   } else {
     pcg32 &generator = Utils::GetThreadLocalPRNG();
     std::uniform_int_distribution<int> int_uniform_distribution(
-        0, (int)(graph->GetNodeSet().size() - 1));
+        0, (int)(total_nodes - 1));
     int current_citation_index = 0;
     while (current_citation_index < actual_num_cited) {
       int current_citation = int_uniform_distribution(generator);
@@ -219,7 +222,7 @@ int CitationEngine::MakeScoredCartelCitations(
           graph->GetAuthorPublications(cartel_author_id);
       std::vector<int> already_published_cartel_author_publications;
       for (size_t i = 0; i < cartel_author_publications.size(); i++) {
-        if (graph->GetNodeSet().contains(cartel_author_publications.at(i)) &&
+        if (graph->HasNode(cartel_author_publications.at(i)) &&
             !in_neighborhood_cartel_nodes_set.contains(
                 cartel_author_publications.at(i)) &&
             !generator_nodes_set.contains(cartel_author_publications.at(i))) {
@@ -335,7 +338,7 @@ int CitationEngine::MakeNullCartelCitations(
           graph->GetAuthorPublications(cartel_author_id);
       std::vector<int> already_published_cartel_author_publications;
       for (size_t i = 0; i < cartel_author_publications.size(); i++) {
-        if (graph->GetNodeSet().contains(cartel_author_publications.at(i)) &&
+        if (graph->HasNode(cartel_author_publications.at(i)) &&
             !in_neighborhood_cartel_nodes_set.contains(
                 cartel_author_publications.at(i)) &&
             !generator_nodes_set.contains(cartel_author_publications.at(i))) {

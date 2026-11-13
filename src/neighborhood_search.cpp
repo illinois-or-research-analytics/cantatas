@@ -239,9 +239,6 @@ NeighborhoodSearch::GetOneAndTwoDistanceNeighborhoods(
   thread_local ThreadLocalVisitedTracker visited;
   visited.Clear();
 
-  const auto &forward_adj = graph->GetForwardAdjList();
-  const auto &backward_adj = graph->GetBackwardAdjList();
-
   if (this->neighborhood_sample == -1) {
     thread_local std::vector<std::pair<int, int>> to_visit;
     for (size_t i = 0; i < generator_nodes.size(); i++) {
@@ -258,22 +255,16 @@ NeighborhoodSearch::GetOneAndTwoDistanceNeighborhoods(
           n_hop_map[current_distance].push_back(current_node);
         }
         if (current_distance < num_hops) {
-          if (graph->GetOutDegree(current_node) > 0 &&
-              (size_t)current_node < forward_adj.size()) {
-            for (int outgoing_neighbor : forward_adj[current_node]) {
-              if (!visited.Contains(outgoing_neighbor)) {
-                visited.Insert(outgoing_neighbor);
-                to_visit.push_back({outgoing_neighbor, current_distance + 1});
-              }
+          for (int outgoing_neighbor : graph->GetOutNeighbors(current_node)) {
+            if (!visited.Contains(outgoing_neighbor)) {
+              visited.Insert(outgoing_neighbor);
+              to_visit.push_back({outgoing_neighbor, current_distance + 1});
             }
           }
-          if (graph->GetInDegree(current_node) > 0 &&
-              (size_t)current_node < backward_adj.size()) {
-            for (int incoming_neighbor : backward_adj[current_node]) {
-              if (!visited.Contains(incoming_neighbor)) {
-                visited.Insert(incoming_neighbor);
-                to_visit.push_back({incoming_neighbor, current_distance + 1});
-              }
+          for (int incoming_neighbor : graph->GetInNeighbors(current_node)) {
+            if (!visited.Contains(incoming_neighbor)) {
+              visited.Insert(incoming_neighbor);
+              to_visit.push_back({incoming_neighbor, current_distance + 1});
             }
           }
         }
@@ -290,22 +281,16 @@ NeighborhoodSearch::GetOneAndTwoDistanceNeighborhoods(
       int generator_node = generator_nodes[i];
       visited.Insert(generator_node);
       std::vector<int> current_one_hop_neighborhood;
-      if (graph->GetOutDegree(generator_node) > 0 &&
-          (size_t)generator_node < forward_adj.size()) {
-        for (int outgoing_neighbor : forward_adj[generator_node]) {
-          if (!visited.Contains(outgoing_neighbor)) {
-            current_one_hop_neighborhood.push_back(outgoing_neighbor);
-            visited.Insert(outgoing_neighbor);
-          }
+      for (int outgoing_neighbor : graph->GetOutNeighbors(generator_node)) {
+        if (!visited.Contains(outgoing_neighbor)) {
+          current_one_hop_neighborhood.push_back(outgoing_neighbor);
+          visited.Insert(outgoing_neighbor);
         }
       }
-      if (graph->GetInDegree(generator_node) > 0 &&
-          (size_t)generator_node < backward_adj.size()) {
-        for (int incoming_neighbor : backward_adj[generator_node]) {
-          if (!visited.Contains(incoming_neighbor)) {
-            current_one_hop_neighborhood.push_back(incoming_neighbor);
-            visited.Insert(incoming_neighbor);
-          }
+      for (int incoming_neighbor : graph->GetInNeighbors(generator_node)) {
+        if (!visited.Contains(incoming_neighbor)) {
+          current_one_hop_neighborhood.push_back(incoming_neighbor);
+          visited.Insert(incoming_neighbor);
         }
       }
       // pick random nodes to get to 2-hop
@@ -325,46 +310,35 @@ NeighborhoodSearch::GetOneAndTwoDistanceNeighborhoods(
                    current_one_hop_neighborhood.end(), generator);
       for (size_t j = 0; j < current_one_hop_neighborhood.size(); j++) {
         int u = current_one_hop_neighborhood[j];
-        int current_two_hop_size = 0;
-        if (graph->GetOutDegree(u) > 0 && (size_t)u < forward_adj.size()) {
-          current_two_hop_size += forward_adj[u].size();
-        }
-        if (graph->GetInDegree(u) > 0 && (size_t)u < backward_adj.size()) {
-          current_two_hop_size += backward_adj[u].size();
-        }
+        auto out_nbrs = graph->GetOutNeighbors(u);
+        auto in_nbrs = graph->GetInNeighbors(u);
+        int current_two_hop_size = static_cast<int>(out_nbrs.size() + in_nbrs.size());
+
         // worst case for one node we might only grab the outgoing edges
         if (n_hop_map[2].size() + current_two_hop_size <
             max_neighborhood_size) {
-          if (graph->GetOutDegree(u) > 0 && (size_t)u < forward_adj.size()) {
-            for (int outgoing_neighbor : forward_adj[u]) {
-              if (!visited.Contains(outgoing_neighbor)) {
-                visited.Insert(outgoing_neighbor);
-                n_hop_map[2].push_back(outgoing_neighbor);
-              }
+          for (int outgoing_neighbor : out_nbrs) {
+            if (!visited.Contains(outgoing_neighbor)) {
+              visited.Insert(outgoing_neighbor);
+              n_hop_map[2].push_back(outgoing_neighbor);
             }
           }
-          if (graph->GetInDegree(u) > 0 && (size_t)u < backward_adj.size()) {
-            for (int incoming_neighbor : backward_adj[u]) {
-              if (!visited.Contains(incoming_neighbor)) {
-                visited.Insert(incoming_neighbor);
-                n_hop_map[2].push_back(incoming_neighbor);
-              }
+          for (int incoming_neighbor : in_nbrs) {
+            if (!visited.Contains(incoming_neighbor)) {
+              visited.Insert(incoming_neighbor);
+              n_hop_map[2].push_back(incoming_neighbor);
             }
           }
         } else {
           std::vector<int> to_be_sampled_neighborhood;
-          if (graph->GetOutDegree(u) > 0 && (size_t)u < forward_adj.size()) {
-            for (int outgoing_neighbor : forward_adj[u]) {
-              if (!visited.Contains(outgoing_neighbor)) {
-                to_be_sampled_neighborhood.push_back(outgoing_neighbor);
-              }
+          for (int outgoing_neighbor : out_nbrs) {
+            if (!visited.Contains(outgoing_neighbor)) {
+              to_be_sampled_neighborhood.push_back(outgoing_neighbor);
             }
           }
-          if (graph->GetInDegree(u) > 0 && (size_t)u < backward_adj.size()) {
-            for (int incoming_neighbor : backward_adj[u]) {
-              if (!visited.Contains(incoming_neighbor)) {
-                to_be_sampled_neighborhood.push_back(incoming_neighbor);
-              }
+          for (int incoming_neighbor : in_nbrs) {
+            if (!visited.Contains(incoming_neighbor)) {
+              to_be_sampled_neighborhood.push_back(incoming_neighbor);
             }
           }
           std::vector<int> sampled_neighborhood;
@@ -400,9 +374,6 @@ NeighborhoodSearch::GetNHopNeighborhood(Graph *graph, int current_year,
   thread_local ThreadLocalVisitedTracker visited;
   visited.Clear();
 
-  const auto &forward_adj = graph->GetForwardAdjList();
-  const auto &backward_adj = graph->GetBackwardAdjList();
-
   if (this->neighborhood_sample == -1) {
     thread_local std::vector<std::pair<int, int>> to_visit;
     for (size_t i = 0; i < generator_nodes.size(); i++) {
@@ -419,22 +390,16 @@ NeighborhoodSearch::GetNHopNeighborhood(Graph *graph, int current_year,
           n_hop_neighborhood.push_back(current_node);
         }
         if (current_distance < num_hops) {
-          if (graph->GetOutDegree(current_node) > 0 &&
-              (size_t)current_node < forward_adj.size()) {
-            for (int outgoing_neighbor : forward_adj[current_node]) {
-              if (!visited.Contains(outgoing_neighbor)) {
-                visited.Insert(outgoing_neighbor);
-                to_visit.push_back({outgoing_neighbor, current_distance + 1});
-              }
+          for (int outgoing_neighbor : graph->GetOutNeighbors(current_node)) {
+            if (!visited.Contains(outgoing_neighbor)) {
+              visited.Insert(outgoing_neighbor);
+              to_visit.push_back({outgoing_neighbor, current_distance + 1});
             }
           }
-          if (graph->GetInDegree(current_node) > 0 &&
-              (size_t)current_node < backward_adj.size()) {
-            for (int incoming_neighbor : backward_adj[current_node]) {
-              if (!visited.Contains(incoming_neighbor)) {
-                visited.Insert(incoming_neighbor);
-                to_visit.push_back({incoming_neighbor, current_distance + 1});
-              }
+          for (int incoming_neighbor : graph->GetInNeighbors(current_node)) {
+            if (!visited.Contains(incoming_neighbor)) {
+              visited.Insert(incoming_neighbor);
+              to_visit.push_back({incoming_neighbor, current_distance + 1});
             }
           }
         }
@@ -450,22 +415,16 @@ NeighborhoodSearch::GetNHopNeighborhood(Graph *graph, int current_year,
       int generator_node = generator_nodes[i];
       visited.Insert(generator_node);
       std::vector<int> current_one_hop_neighborhood;
-      if (graph->GetOutDegree(generator_node) > 0 &&
-          (size_t)generator_node < forward_adj.size()) {
-        for (int outgoing_neighbor : forward_adj[generator_node]) {
-          if (!visited.Contains(outgoing_neighbor)) {
-            current_one_hop_neighborhood.push_back(outgoing_neighbor);
-            visited.Insert(outgoing_neighbor);
-          }
+      for (int outgoing_neighbor : graph->GetOutNeighbors(generator_node)) {
+        if (!visited.Contains(outgoing_neighbor)) {
+          current_one_hop_neighborhood.push_back(outgoing_neighbor);
+          visited.Insert(outgoing_neighbor);
         }
       }
-      if (graph->GetInDegree(generator_node) > 0 &&
-          (size_t)generator_node < backward_adj.size()) {
-        for (int incoming_neighbor : backward_adj[generator_node]) {
-          if (!visited.Contains(incoming_neighbor)) {
-            current_one_hop_neighborhood.push_back(incoming_neighbor);
-            visited.Insert(incoming_neighbor);
-          }
+      for (int incoming_neighbor : graph->GetInNeighbors(generator_node)) {
+        if (!visited.Contains(incoming_neighbor)) {
+          current_one_hop_neighborhood.push_back(incoming_neighbor);
+          visited.Insert(incoming_neighbor);
         }
       }
       // pick random nodes to get to 2-hop
@@ -485,46 +444,35 @@ NeighborhoodSearch::GetNHopNeighborhood(Graph *graph, int current_year,
                    current_one_hop_neighborhood.end(), generator);
       for (size_t j = 0; j < current_one_hop_neighborhood.size(); j++) {
         int u = current_one_hop_neighborhood[j];
-        int current_two_hop_size = 0;
-        if (graph->GetOutDegree(u) > 0 && (size_t)u < forward_adj.size()) {
-          current_two_hop_size += forward_adj[u].size();
-        }
-        if (graph->GetInDegree(u) > 0 && (size_t)u < backward_adj.size()) {
-          current_two_hop_size += backward_adj[u].size();
-        }
+        auto out_nbrs = graph->GetOutNeighbors(u);
+        auto in_nbrs = graph->GetInNeighbors(u);
+        int current_two_hop_size = static_cast<int>(out_nbrs.size() + in_nbrs.size());
+
         // worst case for one node we might only grab the outgoing edges
         if (n_hop_neighborhood.size() + current_two_hop_size <
             max_neighborhood_size) {
-          if (graph->GetOutDegree(u) > 0 && (size_t)u < forward_adj.size()) {
-            for (int outgoing_neighbor : forward_adj[u]) {
-              if (!visited.Contains(outgoing_neighbor)) {
-                visited.Insert(outgoing_neighbor);
-                n_hop_neighborhood.push_back(outgoing_neighbor);
-              }
+          for (int outgoing_neighbor : out_nbrs) {
+            if (!visited.Contains(outgoing_neighbor)) {
+              visited.Insert(outgoing_neighbor);
+              n_hop_neighborhood.push_back(outgoing_neighbor);
             }
           }
-          if (graph->GetInDegree(u) > 0 && (size_t)u < backward_adj.size()) {
-            for (int incoming_neighbor : backward_adj[u]) {
-              if (!visited.Contains(incoming_neighbor)) {
-                visited.Insert(incoming_neighbor);
-                n_hop_neighborhood.push_back(incoming_neighbor);
-              }
+          for (int incoming_neighbor : in_nbrs) {
+            if (!visited.Contains(incoming_neighbor)) {
+              visited.Insert(incoming_neighbor);
+              n_hop_neighborhood.push_back(incoming_neighbor);
             }
           }
         } else {
           std::vector<int> to_be_sampled_neighborhood;
-          if (graph->GetOutDegree(u) > 0 && (size_t)u < forward_adj.size()) {
-            for (int outgoing_neighbor : forward_adj[u]) {
-              if (!visited.Contains(outgoing_neighbor)) {
-                to_be_sampled_neighborhood.push_back(outgoing_neighbor);
-              }
+          for (int outgoing_neighbor : out_nbrs) {
+            if (!visited.Contains(outgoing_neighbor)) {
+              to_be_sampled_neighborhood.push_back(outgoing_neighbor);
             }
           }
-          if (graph->GetInDegree(u) > 0 && (size_t)u < backward_adj.size()) {
-            for (int incoming_neighbor : backward_adj[u]) {
-              if (!visited.Contains(incoming_neighbor)) {
-                to_be_sampled_neighborhood.push_back(incoming_neighbor);
-              }
+          for (int incoming_neighbor : in_nbrs) {
+            if (!visited.Contains(incoming_neighbor)) {
+              to_be_sampled_neighborhood.push_back(incoming_neighbor);
             }
           }
           std::vector<int> sampled_neighborhood;

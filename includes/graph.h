@@ -1,6 +1,7 @@
 #ifndef GRAPH_H
 #define GRAPH_H
 
+#include "ladybug/ladybug_db.h"
 #include "pcg_random.hpp"
 #include <cmath>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include <queue>
 #include <random>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -104,6 +106,52 @@ public:
     return header_to_index_map;
   }
 
+  // --- LADYBUG DB INTEGRATION & OUT-OF-CORE DELEGATION ---
+  void AttachLadyBugDB(ladybug::LadyBugDB *db) noexcept { db_ = db; }
+  bool HasLadyBugDB() const noexcept { return db_ != nullptr; }
+  ladybug::LadyBugDB *GetLadyBugDB() noexcept { return db_; }
+  const ladybug::LadyBugDB *GetLadyBugDB() const noexcept { return db_; }
+  void ReleaseHeavyStructures();
+
+  inline size_t GetNodeCount() const noexcept {
+    if (db_) {
+      return db_->Nodes().GetNodeCount();
+    }
+    return node_set.size();
+  }
+
+  inline bool HasNode(int node) const noexcept {
+    if (node < 0) return false;
+    if (db_) {
+      return static_cast<size_t>(node) < db_->Nodes().GetNodeCount();
+    }
+    return IsNodeValid(node);
+  }
+
+  inline std::span<const int32_t> GetOutNeighbors(int u) const noexcept {
+    if (db_) {
+      return db_->CSR().GetOutNeighbors(u);
+    }
+    if (u >= 0 && static_cast<size_t>(u) < forward_adj_list.size()) {
+      return std::span<const int32_t>(
+          reinterpret_cast<const int32_t *>(forward_adj_list[u].data()),
+          forward_adj_list[u].size());
+    }
+    return {};
+  }
+
+  inline std::span<const int32_t> GetInNeighbors(int v) const noexcept {
+    if (db_) {
+      return db_->CSR().GetInNeighbors(v);
+    }
+    if (v >= 0 && static_cast<size_t>(v) < backward_adj_list.size()) {
+      return std::span<const int32_t>(
+          reinterpret_cast<const int32_t *>(backward_adj_list[v].data()),
+          backward_adj_list[v].size());
+    }
+    return {};
+  }
+
   inline const std::set<int> &GetNodeSet() const { return node_set; }
   inline const std::vector<std::vector<int>> &GetForwardAdjList() const { return forward_adj_list; }
   inline const std::vector<std::vector<int>> &GetBackwardAdjList() const { return backward_adj_list; }
@@ -137,9 +185,13 @@ public:
   void ComputeAuthorReputations();
   int ComputeSingleAuthorReputation(int author_id);
   inline bool IsNodeValid(int node) const {
+    if (node < 0) return false;
+    if (db_) {
+      return static_cast<size_t>(node) < db_->Nodes().GetNodeCount();
+    }
     return static_cast<size_t>(node) < node_attributes.size() && node_attributes[node].is_valid;
   }
-  int GetNextAuthorId() const noexcept { return next_author_id; }
+  int GetNextAuthorId() const noexcept;
   const std::unordered_map<int, int> &GetAuthorBirthYearMap() const noexcept {
     return author_birth_year_map;
   }
@@ -157,9 +209,11 @@ public:
   */
   int GetAuthorReputationForNode(int node) const;
   inline void SetAuthorBirthYear(int author_id, int year) {
-    if (!author_birth_year_map.contains(author_id)) {
-      author_birth_year_map[author_id] = year;
+    if (db_) {
+      db_->Authors().SetAuthorBirthYear(author_id, year);
+      return;
     }
+    author_birth_year_map[author_id] = year;
   }
   /*
   Input: int u
@@ -174,175 +228,282 @@ public:
     return node_attributes[node];
   }
 
-  inline int GetYear(int node) const { return node_attributes[node].year; }
+  inline int GetYear(int node) const {
+    if (db_) return db_->Nodes().GetYear(node);
+    return node_attributes[node].year;
+  }
   inline void SetYear(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetYear(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].year = val;
   }
 
-  inline double GetAlpha(int node) const { return node_attributes[node].alpha; }
+  inline double GetAlpha(int node) const {
+    if (db_) return db_->Nodes().GetAlpha(node);
+    return node_attributes[node].alpha;
+  }
   inline void SetAlpha(int node, double val) {
+    if (db_) {
+      db_->Nodes().SetAlpha(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].alpha = val;
   }
 
   inline double GetPaWeight(int node) const {
+    if (db_) return db_->Nodes().GetPaWeight(node);
     return node_attributes[node].pa_weight;
   }
   inline void SetPaWeight(int node, double val) {
+    if (db_) {
+      db_->Nodes().SetPaWeight(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].pa_weight = val;
   }
 
   inline double GetFitWeight(int node) const {
+    if (db_) return db_->Nodes().GetFitWeight(node);
     return node_attributes[node].fit_weight;
   }
   inline void SetFitWeight(int node, double val) {
+    if (db_) {
+      db_->Nodes().SetFitWeight(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].fit_weight = val;
   }
 
   inline double GetNumAuthorsWeight(int node) const {
+    if (db_) return db_->Nodes().GetNumAuthorsWeight(node);
     return node_attributes[node].num_authors_weight;
   }
   inline void SetNumAuthorsWeight(int node, double val) {
+    if (db_) {
+      db_->Nodes().SetNumAuthorsWeight(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].num_authors_weight = val;
   }
 
   inline double GetAuthorReputationWeight(int node) const {
+    if (db_) return db_->Nodes().GetAuthorRepWeight(node);
     return node_attributes[node].author_reputation_weight;
   }
   inline void SetAuthorReputationWeight(int node, double val) {
+    if (db_) {
+      db_->Nodes().SetAuthorRepWeight(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].author_reputation_weight = val;
   }
 
   inline int GetFitnessLagDuration(int node) const {
+    if (db_) return db_->Nodes().GetFitnessLagDuration(node);
     return node_attributes[node].fitness_lag_duration;
   }
   inline void SetFitnessLagDuration(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetFitnessLagDuration(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].fitness_lag_duration = val;
   }
 
   inline int GetFitnessPeakValue(int node) const {
+    if (db_) return db_->Nodes().GetFitnessPeakValue(node);
     return node_attributes[node].fitness_peak_value;
   }
   inline void SetFitnessPeakValue(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetFitnessPeakValue(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].fitness_peak_value = val;
   }
 
   inline int GetFitnessPeakDuration(int node) const {
+    if (db_) return db_->Nodes().GetFitnessPeakDuration(node);
     return node_attributes[node].fitness_peak_duration;
   }
   inline void SetFitnessPeakDuration(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetFitnessPeakDuration(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].fitness_peak_duration = val;
   }
 
   inline int GetAssignedOutDegree(int node) const {
+    if (db_) return db_->Nodes().GetAssignedOutDegree(node);
     return node_attributes[node].assigned_out_degree;
   }
   inline void SetAssignedOutDegree(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetAssignedOutDegree(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].assigned_out_degree = val;
   }
 
   inline int GetPlantedNodesLineNumber(int node) const {
+    if (db_) return db_->Nodes().GetPlantedLineNumber(node);
     return node_attributes[node].planted_nodes_line_number;
   }
   inline void SetPlantedNodesLineNumber(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetPlantedLineNumber(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].planted_nodes_line_number = val;
   }
   inline bool HasPlantedNodesLineNumber(int node) const {
+    if (db_) return db_->Nodes().GetPlantedLineNumber(node) != -1;
     return node_attributes[node].planted_nodes_line_number != -1;
   }
 
   inline int GetSampledNeighborhoodSize(int node) const {
+    if (db_) return db_->Nodes().GetSampledNeighborhoodSize(node);
     return node_attributes[node].sampled_neighborhood_size;
   }
   inline void SetSampledNeighborhoodSize(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetSampledNeighborhoodSize(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].sampled_neighborhood_size = val;
   }
 
-  inline const std::string &GetGeneratorNodeString(int node) const {
-    return node_attributes[node].generator_node_string;
-  }
-  inline void SetGeneratorNodeString(int node, const std::string &val) {
-    EnsureNodeCapacity(node);
-    node_attributes[node].generator_node_string = val;
-  }
+  const std::string &GetGeneratorNodeString(int node) const;
+  void SetGeneratorNodeString(int node, const std::string &val);
 
   inline int GetCommunityAssignment(int node) const {
+    if (db_) return db_->Nodes().GetClusterId(node);
     return node_attributes[node].cluster_id;
   }
   inline void SetCommunityAssignment(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetClusterId(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].cluster_id = val;
   }
 
   inline int GetFullyRandomCitations(int node) const {
+    if (db_) return db_->Nodes().GetFullyRandomCitations(node);
     return node_attributes[node].fully_random_citations;
   }
   inline void SetFullyRandomCitations(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetFullyRandomCitations(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].fully_random_citations = val;
   }
 
   inline int GetAuthorId(int node) const {
+    if (db_) return db_->Nodes().GetAuthorId(node);
     return node_attributes[node].author_id;
   }
   inline void SetAuthorId(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetAuthorId(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].author_id = val;
   }
 
   inline int GetInitialAuthorReputation(int node) const {
+    if (db_) return db_->Nodes().GetInitialAuthorReputation(node);
     return node_attributes[node].initial_author_reputation;
   }
   inline void SetInitialAuthorReputation(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetInitialAuthorReputation(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].initial_author_reputation = val;
   }
 
   inline int GetNumAuthors(int node) const {
+    if (db_) return db_->Nodes().GetNumAuthors(node);
     return node_attributes[node].num_authors;
   }
   inline void SetNumAuthors(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetNumAuthors(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].num_authors = val;
   }
 
   inline int GetCartelIdAttr(int node) const {
+    if (db_) return db_->Nodes().GetCartelId(node);
     return node_attributes[node].cartel_id;
   }
   inline void SetCartelIdAttr(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetCartelId(node, val);
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].cartel_id = val;
   }
 
-  inline NodeType GetType(int node) const { return node_attributes[node].type; }
+  inline NodeType GetType(int node) const {
+    if (db_) return static_cast<NodeType>(db_->Nodes().GetType(node));
+    return node_attributes[node].type;
+  }
   inline void SetType(int node, NodeType val) {
+    if (db_) {
+      db_->Nodes().SetType(node, static_cast<ladybug::NodeType>(val));
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].type = val;
   }
 
   inline int GetInDegree(int node) const {
+    if (db_) return static_cast<int>(db_->CSR().GetInDegree(node));
     return node_attributes[node].in_degree;
   }
   inline void SetInDegree(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetInDegree(node, static_cast<uint32_t>(val));
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].in_degree = val;
   }
 
   inline int GetOutDegree(int node) const {
+    if (db_) return static_cast<int>(db_->CSR().GetOutDegree(node));
     return node_attributes[node].out_degree;
   }
   inline void SetOutDegree(int node, int val) {
+    if (db_) {
+      db_->Nodes().SetOutDegree(node, static_cast<uint32_t>(val));
+      return;
+    }
     EnsureNodeCapacity(node);
     node_attributes[node].out_degree = val;
   }
@@ -468,6 +629,7 @@ public:
   int GetClusterSize(int cluster_id, int current_year = -1) const;
 
 private:
+  ladybug::LadyBugDB *db_ = nullptr;
   std::set<int> node_set;
   std::string edgelist;
   std::string nodelist;
@@ -489,6 +651,10 @@ protected:
   std::unordered_map<int, int> author_reputation_map;
   std::vector<NodeAttributes> node_attributes;
   inline void EnsureNodeCapacity(int node) {
+    if (db_) {
+      db_->Nodes().EnsureNodeCapacity(node + 1);
+      return;
+    }
     if (static_cast<size_t>(node) >= node_attributes.size()) {
       size_t new_size =
           std::max((size_t)node + 1, node_attributes.size() * 2 + 1);

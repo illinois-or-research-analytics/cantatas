@@ -243,6 +243,7 @@ void LadyBugDB::IngestFromGraph(const ::Graph &graph) {
     node_store_.SetNumAuthors(u, graph.GetNumAuthors(u));
     node_store_.SetInitialAuthorReputation(u, graph.GetInitialAuthorReputation(u));
     node_store_.SetCartelId(u, graph.GetCartelIdAttr(u));
+    node_store_.SetGeneratorNode(u, -1);
     int cid = graph.GetCommunityAssignment(u);
     node_store_.SetClusterId(u, cid);
     if (cid >= 0) {
@@ -253,11 +254,17 @@ void LadyBugDB::IngestFromGraph(const ::Graph &graph) {
   // 2. Build Bidirectional CSR directly from in-memory adjacency lists
   csr_.BuildFromAdjLists(n_nodes, graph.GetForwardAdjList(), graph.GetBackwardAdjList());
 
-  // 3. Sync Author Store
+  // 3. Sync Author Store & Cartels
   author_store_.SetNextAuthorId(graph.GetNextAuthorId());
   author_store_.SetAuthorBirthYearMap(graph.GetAuthorBirthYearMap());
   author_store_.SetAuthorPublicationMap(graph.GetAuthorPublicationMap());
   author_store_.SetPublicationCountToAuthorMap(graph.GetPublicationCountToAuthorMap());
+  for (int cartel_id : graph.GetCartelSet()) {
+    for (int author : graph.GetCartelAuthors(cartel_id)) {
+      author_store_.SetCartelID(author, cartel_id);
+    }
+  }
+  author_store_.ComputeAuthorReputations(csr_);
 
   // 4. Update Manifest
   manifest_.node_count = node_store_.GetNodeCount();
@@ -277,7 +284,7 @@ void LadyBugDB::Checkpoint(int current_year) {
   csr_.MergeAnnualDeltaBuffer();
 
   // 2. Recompute author reputations
-  author_store_.ComputeAuthorReputations(node_store_);
+  author_store_.ComputeAuthorReputations(csr_);
 
   // 3. Log commit to journal and sync
   journal_.AppendCommit(current_year, node_store_.GetNodeCount(), csr_.GetEdgeCount());
