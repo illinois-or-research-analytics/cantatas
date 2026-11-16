@@ -302,4 +302,16 @@ uint64_t ClusterCoordinator::GlobalMax(uint64_t local_val) const {
   return local_val;
 }
 
+bool ClusterCoordinator::GlobalAny(bool local_val) const {
+#if DISTRIBUTED_HAS_MPI
+  if (mpi_enabled_) {
+    int in = local_val ? 1 : 0;
+    int out = 0;
+    MPI_Allreduce(&in, &out, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+    return out != 0;
+  }
+#endif
+  return local_val;
+}
+
 } // namespace distributed

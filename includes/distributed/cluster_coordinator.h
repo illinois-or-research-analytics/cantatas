@@ -78,6 +78,7 @@ public:
   // Global reduction helpers
   uint64_t GlobalSum(uint64_t local_val) const;
   uint64_t GlobalMax(uint64_t local_val) const;
+  bool GlobalAny(bool local_val) const;
 
   // Accessors
   int GetRank() const noexcept { return rank_; }

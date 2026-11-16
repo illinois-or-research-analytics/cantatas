@@ -5,8 +5,10 @@
 #include "abm.h"
 #include "argparse.hpp"
 #include "distributed/cluster_coordinator.h"
+#include "signal_supervisor.h"
 
 int main(int argc, char *argv[]) {
+  ladybug::SignalSupervisor::RecordProcessStartTime();
   distributed::ClusterCoordinator coordinator;
   coordinator.Init(argc, argv);
 

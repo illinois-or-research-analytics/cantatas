@@ -900,7 +900,8 @@ void ABM::RunSimulationLoop() {
       non_random_generator_uniform_distribution{0, 1};
   for (int current_year = this->start_year;
        current_year < this->start_year + this->num_cycles; current_year++) {
-    this->logger.prev_time = std::chrono::steady_clock::now();
+    auto cycle_start_time = std::chrono::steady_clock::now();
+    this->logger.prev_time = cycle_start_time;
     int current_graph_size = static_cast<int>(this->graph->GetNodeCount());
     this->logger.WriteToLogFile(
         "current year is: " + std::to_string(current_year) +
@@ -1183,10 +1184,12 @@ void ABM::RunSimulationLoop() {
                                  " clusters";
     this->logger.LogTime(current_year, timing_summary, local_new_agents_count);
 
-    // Record per-cluster agent additions in timing log file
-    for (const auto &[cid, count] : local_cluster_new_agents) {
-      std::string cluster_label = "Cluster " + std::to_string(cid) + " (" + rank_prefix + ") new agents";
-      this->logger.LogTime(current_year, cluster_label, count);
+    // Record per-cluster agent additions in timing log file only in verbose mode (log_level >= 2)
+    if (this->log_level >= 2) {
+      for (const auto &[cid, count] : local_cluster_new_agents) {
+        std::string cluster_label = "Cluster " + std::to_string(cid) + " (" + rank_prefix + ") new agents";
+        this->logger.LogTime(current_year, cluster_label, count);
+      }
     }
 
     std::stringstream cluster_ss;
@@ -1774,14 +1777,6 @@ void ABM::RunSimulationLoop() {
       size_t remote_routed = this->coordinator.SynchronizeSuperstep(current_year, this->db, this->exchange);
       this->logger.LogTime(current_year, "Synchronize LadyBug superstep & checkpoint (inter-rank citations routed: " + std::to_string(remote_routed) + ")", static_cast<int>(remote_routed));
       this->UpdateGraphAttributesInitialAuthorReputations(this->graph, new_nodes_vec);
-
-      if (this->signal_supervisor.ShouldStop()) {
-        this->logger.WriteToLogFile(
-            "Signal or wall-clock threshold reached. Gracefully pausing simulation at year " +
-                std::to_string(current_year),
-            Log::info);
-        break;
-      }
     } else {
       for (size_t i = 0; i < new_edges_vec.size(); i++) {
         int new_node = new_edges_vec[i].first;
@@ -1812,6 +1807,24 @@ void ABM::RunSimulationLoop() {
       this->graph->ComputeAuthorReputations();
       this->UpdateGraphAttributesInitialAuthorReputations(this->graph,
                                                            new_nodes_vec);
+    }
+
+    auto cycle_end_time = std::chrono::steady_clock::now();
+    double cycle_duration =
+        std::chrono::duration<double>(cycle_end_time - cycle_start_time).count();
+    this->signal_supervisor.RecordCycleDuration(cycle_duration);
+
+    bool should_stop = this->coordinator.GlobalAny(this->signal_supervisor.ShouldStop());
+    if (should_stop) {
+      this->logger.WriteToLogFile(
+          "Signal or wall-clock threshold reached (elapsed: " +
+              std::to_string(static_cast<int>(this->signal_supervisor.GetElapsedSeconds())) +
+              "s, remaining: " +
+              std::to_string(static_cast<int>(this->signal_supervisor.GetRemainingSeconds())) +
+              "s, last cycle: " + std::to_string(static_cast<int>(cycle_duration)) +
+              "s). Gracefully pausing simulation at year " + std::to_string(current_year),
+          Log::info);
+      break;
     }
 
     new_nodes_vec.clear();

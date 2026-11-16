@@ -1,16 +1,23 @@
 #include "signal_supervisor.h"
+#include <algorithm>
 #include <iostream>
 
 namespace ladybug {
 
 std::atomic<bool> SignalSupervisor::signal_caught_{false};
+std::chrono::time_point<std::chrono::steady_clock> SignalSupervisor::process_start_time_ =
+    std::chrono::steady_clock::now();
 
 SignalSupervisor::SignalSupervisor()
-    : start_time_(std::chrono::steady_clock::now()),
-      limit_seconds_(0.0),
-      safety_margin_seconds_(1200.0) {}
+    : limit_seconds_(0.0),
+      safety_margin_seconds_(1200.0),
+      last_cycle_duration_seconds_(0.0) {}
 
 SignalSupervisor::~SignalSupervisor() {}
+
+void SignalSupervisor::RecordProcessStartTime() noexcept {
+  process_start_time_ = std::chrono::steady_clock::now();
+}
 
 void SignalSupervisor::SignalHandler(int signum) {
   signal_caught_.store(true, std::memory_order_relaxed);
@@ -29,7 +36,10 @@ void SignalSupervisor::Register() {
 void SignalSupervisor::SetWallClockLimit(double limit_seconds, double safety_margin_seconds) {
   limit_seconds_ = limit_seconds;
   safety_margin_seconds_ = safety_margin_seconds;
-  start_time_ = std::chrono::steady_clock::now();
+}
+
+void SignalSupervisor::RecordCycleDuration(double seconds) noexcept {
+  last_cycle_duration_seconds_ = seconds;
 }
 
 bool SignalSupervisor::IsSignalCaught() noexcept {
@@ -42,7 +52,7 @@ void SignalSupervisor::ResetSignal() noexcept {
 
 double SignalSupervisor::GetElapsedSeconds() const noexcept {
   auto now = std::chrono::steady_clock::now();
-  return std::chrono::duration<double>(now - start_time_).count();
+  return std::chrono::duration<double>(now - process_start_time_).count();
 }
 
 double SignalSupervisor::GetRemainingSeconds() const noexcept {
@@ -59,7 +69,9 @@ bool SignalSupervisor::ShouldStop() const {
   }
   if (limit_seconds_ > 0.0) {
     double remaining = GetRemainingSeconds();
-    if (remaining <= safety_margin_seconds_) {
+    double required_buffer =
+        std::max(safety_margin_seconds_, last_cycle_duration_seconds_ * 1.3);
+    if (remaining <= required_buffer) {
       return true;
     }
   }
