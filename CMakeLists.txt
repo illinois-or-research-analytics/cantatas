@@ -1,95 +1,71 @@
 cmake_minimum_required(VERSION 3.23)
-#[[ In-source build check ]]
+
 if("${CMAKE_BINARY_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
-    message(FATAL_ERROR "In-source builds are not allowed.")
-    message(WARNING "Remove CMakeFiles/ and CMakeCache.txt in the\
-            source root before building again.")
+    message(FATAL_ERROR "In-source builds are not allowed. Use a separate build directory.")
+endif()
+
+project(abm VERSION 9.0.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -funroll-loops")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    # AVX2/FMA baseline, matching the cluster's compute nodes.
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=x86-64-v3")
+endif()
+set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer")
+
+find_package(OpenMP REQUIRED)
+find_package(MPI COMPONENTS CXX)
+if(MPI_CXX_FOUND)
+    message(STATUS "MPI found: multi-rank runs enabled")
 else()
-    #[[ Set project version ]]
-    project(abm)
-    # list(APPEND CMAKE_PREFIX_PATH ${CMAKE_SOURCE_DIR}/external_libs/lib/cmake/igraph)
-    # list(APPEND CMAKE_PREFIX_PATH ${CMAKE_SOURCE_DIR}/external_libs/lib/cmake/libleidenalg)
-    # list(APPEND CMAKE_PREFIX_PATH ${CMAKE_SOURCE_DIR}/external_libs/lib64/cmake/igraph)
-    # list(APPEND CMAKE_PREFIX_PATH ${CMAKE_SOURCE_DIR}/external_libs/lib64/cmake/libleidenalg)
-    # find_package(igraph 0.10 CONFIG REQUIRED)
-    # find_package(libleidenalg 0.11 CONFIG REQUIRED)
-    find_package(Eigen3 REQUIRED)
-    find_package(OpenMP REQUIRED)
+    message(STATUS "MPI not found: building single-process only")
+endif()
 
-    find_package(MPI REQUIRED)
-    if(MPI_FOUND)
-        message(STATUS "MPI found: ${MPI_CXX_COMPILER}")
-        add_definitions(-DUSE_MPI)
-    endif()
+add_subdirectory(external_libs)
 
-    set(ABM_MAJOR_VERSION 8)
-    set(ABM_MINOR_VERSION 0)
-    set(ABM_PATCH_VERSION 0)
-    set(ABM_VERSION
-        ${ABM_MAJOR_VERSION}.
-        ${ABM_MINOR_VERSION}.
-        ${ABM_PATCH_VERSION})
+set(CORE_SOURCES
+    src/abm.cpp
+    src/agent_factory.cpp
+    src/citation_engine.cpp
+    src/config.cpp
+    src/neighborhood_search.cpp
+    src/signal_supervisor.cpp
+    src/utils.cpp
+    src/vectorized_scoring.cpp
+    src/vose_alias.cpp
+    src/ladybug/ladybug_authors.cpp
+    src/ladybug/ladybug_csr.cpp
+    src/ladybug/ladybug_db.cpp
+    src/ladybug/ladybug_export.cpp
+    src/ladybug/ladybug_ingest.cpp
+    src/ladybug/ladybug_snapshot.cpp
+    src/distributed/cluster_coordinator.cpp
+    src/distributed/distributed_partitioner.cpp
+)
 
+add_library(cantatas_core STATIC ${CORE_SOURCES})
+target_include_directories(cantatas_core PUBLIC ${CMAKE_SOURCE_DIR}/includes)
+target_link_libraries(cantatas_core PUBLIC OpenMP::OpenMP_CXX external_header_libs)
+if(MPI_CXX_FOUND)
+    target_link_libraries(cantatas_core PUBLIC MPI::MPI_CXX)
+endif()
 
-    #[[ CONSTANTS ]]
-    # Compiler options
-    set(CMAKE_CXX_STANDARD 20)
-    set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # for clangd lsp
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=x86-64-v3 -funroll-loops -fomit-frame-pointer")
-    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -ggdb -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer")
-    # set (CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -ggdb -fno-omit-frame-pointer")
-    # File paths
-    set(SOURCE_MAIN ${CMAKE_SOURCE_DIR}/src/main.cpp)
-    set(SOURCE_FILES
-        ${CMAKE_SOURCE_DIR}/src/abm.cpp
-        ${CMAKE_SOURCE_DIR}/src/graph.cpp
-        ${CMAKE_SOURCE_DIR}/src/utils.cpp
-        ${CMAKE_SOURCE_DIR}/src/metrics_engine.cpp
-        ${CMAKE_SOURCE_DIR}/src/neighborhood_search.cpp
-        ${CMAKE_SOURCE_DIR}/src/citation_engine.cpp
-        ${CMAKE_SOURCE_DIR}/src/vose_alias.cpp
-        ${CMAKE_SOURCE_DIR}/src/vectorized_scoring.cpp
-        ${CMAKE_SOURCE_DIR}/src/signal_supervisor.cpp
-    )
-    #[[ CONSTANTS END ]]
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(abm src/main.cpp)
+target_link_libraries(abm PRIVATE cantatas_core)
 
-    set(LADYBUG_SOURCES
-        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_node_store.cpp
-        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_csr.cpp
-        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_cluster_index.cpp
-        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_author_store.cpp
-        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_journal.cpp
-        ${CMAKE_SOURCE_DIR}/src/ladybug/ladybug_db.cpp
-    )
+# Reduces a run's CSV output to summary statistics (see tools/compare_runs.py).
+add_executable(run_summary tools/run_summary.cpp)
 
-    set(DISTRIBUTED_SOURCES
-        ${CMAKE_SOURCE_DIR}/src/distributed/distributed_partitioner.cpp
-        ${CMAKE_SOURCE_DIR}/src/distributed/ghost_cell_manager.cpp
-        ${CMAKE_SOURCE_DIR}/src/distributed/actor_exchange.cpp
-        ${CMAKE_SOURCE_DIR}/src/distributed/cluster_coordinator.cpp
-    )
-
-    #[[ Define the output binary ]]
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-    add_executable(abm
-        ${SOURCE_MAIN}
-        ${SOURCE_FILES}
-        ${LADYBUG_SOURCES}
-        ${DISTRIBUTED_SOURCES}
-        )
-
-    #[[ Link libraries ]]
-    add_subdirectory(external_libs)
-    target_link_libraries(abm PUBLIC OpenMP::OpenMP_CXX)
-    target_link_libraries(abm PUBLIC Eigen3::Eigen)
-    target_link_libraries(abm PUBLIC external_header_libs)
-    if(MPI_FOUND)
-        target_link_libraries(abm PUBLIC MPI::MPI_CXX)
-    endif()
-
-    target_include_directories(abm
-        PUBLIC ${CMAKE_SOURCE_DIR}/includes
-    )
-
-endif("${CMAKE_BINARY_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

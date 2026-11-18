@@ -1,16 +1,16 @@
 #ifndef STRUCTS_H
 #define STRUCTS_H
-#include <optional>
-#include <span>
-#include <string>
-#include <unordered_map>
-#include <vector>
 
+#include <span>
+
+// Per-node preference components for the current year. The values are not
+// normalized globally: each candidate set is renormalized when it is scored,
+// so a global normalization would cancel out.
 struct alignas(32) NodeScoreComponents {
-  double pa = 0.0;
-  double fit = 0.0;
-  double na = 0.0;
-  double ar = 0.0;
+  double pa = 0.0;  // preferential attachment (in-degree)
+  double fit = 0.0; // fitness
+  double na = 0.0;  // number of authors
+  double ar = 0.0;  // author reputation (h-index)
 };
 
 struct NodeMetrics {
@@ -22,19 +22,6 @@ struct AgentWeights {
   double fit_weight;
   double num_authors_weight;
   double author_reputation_weight;
-};
-
-struct ClonalCartelAgent {
-  std::optional<int> num_authors;
-  std::optional<double> pa_weight;
-  std::optional<double> fit_weight;
-  std::optional<double> num_authors_weight;
-  std::optional<double> author_reputation_weight;
-  std::optional<int> out_degree;
-  std::optional<double> alpha;
-  std::optional<int> fitness_lag_duration;
-  std::optional<int> fitness_peak_value;
-  std::optional<int> fitness_peak_duration;
 };
 
 #endif

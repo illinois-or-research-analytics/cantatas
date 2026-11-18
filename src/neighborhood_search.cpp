@@ -1,509 +1,266 @@
 #include "neighborhood_search.h"
+#include "hash_set.h"
+#include "rng.h"
+
 #include <algorithm>
-#include <iostream>
-#include <queue>
+#include <cmath>
+#include <cstdlib>
+#include <iterator>
+#include <random>
 #include <sstream>
+#include <stdexcept>
 
 namespace {
-class ThreadLocalVisitedTracker {
-public:
-  inline bool Contains(int node) const {
-    if (node < 0 || (size_t)node >= (visited_words.size() << 6)) {
-      return false;
+
+using NodeSet = StampedHashSet<int32_t>;
+
+// Adds up to `need` distinct entries of (a ++ b) that are not yet visited,
+// uniformly without replacement, and marks them visited. Returns how many
+// were added.
+//
+// Short lists use the original method (collect the unvisited entries, then
+// std::sample). Long lists draw random positions and reject repeats and
+// visited nodes, which costs O(need) instead of O(list length); this is what
+// keeps hub neighbor lists (millions of citers) from dominating run time.
+size_t SampleUnvisited(std::span<const int32_t> a, std::span<const int32_t> b, size_t need,
+                       NodeSet &visited, std::vector<int> &out, pcg32 &generator) {
+  const size_t d = a.size() + b.size();
+  if (need == 0 || d == 0) {
+    return 0;
+  }
+  auto at = [&](size_t i) { return i < a.size() ? a[i] : b[i - a.size()]; };
+  thread_local std::vector<int> pool;
+  thread_local std::vector<int> picked;
+  size_t added = 0;
+
+  auto exact = [&](auto keep_position) {
+    pool.clear();
+    for (size_t i = 0; i < d; ++i) {
+      if (!keep_position(i)) continue;
+      int x = at(i);
+      if (!visited.Contains(x)) pool.push_back(x);
     }
-    return (visited_words[(size_t)node >> 6] & (1ULL << ((size_t)node & 63))) != 0;
+    picked.clear();
+    std::sample(pool.begin(), pool.end(), std::back_inserter(picked), need - added, generator);
+    for (int x : picked) {
+      if (visited.Insert(x)) {
+        out.push_back(x);
+        ++added;
+      }
+    }
+  };
+
+  // CANTATAS_EXACT_2HOP=1 forces the original method (diagnostics only).
+  static const bool force_exact = std::getenv("CANTATAS_EXACT_2HOP") != nullptr;
+  if (force_exact || d <= 4 * need + 64) {
+    exact([](size_t) { return true; });
+    return added;
   }
 
-  inline void Insert(int node) {
-    if (node < 0) {
-      return;
-    }
-    size_t word_idx = (size_t)node >> 6;
-    if (word_idx >= visited_words.size()) {
-      visited_words.resize(word_idx + 1024, 0);
-    }
-    uint64_t mask = 1ULL << ((size_t)node & 63);
-    if ((visited_words[word_idx] & mask) == 0) {
-      visited_words[word_idx] |= mask;
-      visited_list.push_back(node);
+  thread_local StampedHashSet<uint64_t> drawn;
+  drawn.Clear();
+  std::uniform_int_distribution<size_t> pick(0, d - 1);
+  const size_t max_draws = 8 * need + 256;
+  size_t draws = 0;
+  while (added < need && draws < max_draws) {
+    size_t pos = pick(generator);
+    ++draws;
+    if (!drawn.Insert(pos)) continue;
+    int x = at(pos);
+    if (visited.Insert(x)) {
+      out.push_back(x);
+      ++added;
     }
   }
-
-  inline void Clear() {
-    for (int node : visited_list) {
-      visited_words[(size_t)node >> 6] = 0;
-    }
-    visited_list.clear();
+  if (added < need) {
+    // Most of the list was already visited: finish exactly over the rest.
+    exact([&](size_t i) { return !drawn.Contains(i); });
   }
+  return added;
+}
 
-private:
-  std::vector<uint64_t> visited_words;
-  std::vector<int> visited_list;
-};
 } // namespace
 
-NeighborhoodSearch::NeighborhoodSearch(std::string recency_bins_str,
-                                       bool use_alpha,
-                                       int neighborhood_sample) {
-  this->recency_bins_str = recency_bins_str;
-  this->use_alpha = use_alpha;
-  this->neighborhood_sample = neighborhood_sample;
-  this->InitializeBinBoundaries();
-}
-
-void NeighborhoodSearch::InitializeBinBoundaries() {
-  std::string bin_boundary_string = this->recency_bins_str;
-  std::stringstream ss(bin_boundary_string);
-  std::string current_value;
-  int element_no = 0;
-  while (std::getline(ss, current_value, ',')) {
-    int current_bin_value = std::stoi(current_value);
-    if (current_bin_value != -1) {
-      this->bin_boundaries.push_back(current_bin_value);
+NeighborhoodSearch::NeighborhoodSearch(const std::string &recency_bins, bool use_alpha,
+                                       int neighborhood_sample)
+    : use_alpha_(use_alpha), neighborhood_sample_(neighborhood_sample) {
+  std::stringstream ss(recency_bins);
+  std::string value;
+  int elements = 0;
+  while (std::getline(ss, value, ',')) {
+    int bin = std::stoi(value);
+    if (bin != -1) {
+      bin_boundaries_.push_back(bin);
     }
-    element_no++;
+    ++elements;
   }
-  this->num_bins = element_no;
-  this->BuildBinLUT();
-}
-
-void NeighborhoodSearch::BuildBinLUT() {
-  this->recency_bin_lut.resize(1024);
+  if (bin_boundaries_.empty() || bin_boundaries_[0] != 1) {
+    throw std::runtime_error("recency_bins must be non-empty and start with 1");
+  }
+  num_bins = elements;
+  recency_bin_lut_.resize(1024);
   for (int age = 0; age < 1024; ++age) {
-    int bin = static_cast<int>(this->bin_boundaries.size() - 1);
-    for (size_t i = 0; i < this->bin_boundaries.size() - 1; ++i) {
-      if (this->bin_boundaries[i] <= age && age < this->bin_boundaries[i + 1]) {
+    int bin = static_cast<int>(bin_boundaries_.size()) - 1;
+    for (size_t i = 0; i + 1 < bin_boundaries_.size(); ++i) {
+      if (bin_boundaries_[i] <= age && age < bin_boundaries_[i + 1]) {
         bin = static_cast<int>(i);
         break;
       }
     }
-    this->recency_bin_lut[age] = bin;
+    recency_bin_lut_[age] = bin;
   }
 }
 
-std::vector<int> NeighborhoodSearch::GetNumCitationsPerNeighborhood(
-    double alpha, int total_num_citations_neighborhood,
-    const std::vector<std::vector<int>> &n_hop_map) {
-  size_t hop1_size = (n_hop_map.size() > 1) ? n_hop_map[1].size() : 0;
-  size_t hop2_size = (n_hop_map.size() > 2) ? n_hop_map[2].size() : 0;
-  return GetNumCitationsPerNeighborhood(alpha, total_num_citations_neighborhood,
-                                        hop1_size, hop2_size);
-}
-
-std::vector<int> NeighborhoodSearch::GetNumCitationsPerNeighborhood(
-    double alpha, int total_num_citations_neighborhood,
-    size_t hop1_size, size_t hop2_size) {
-  std::vector<int> num_citations_per_neighborhood(3, 0);
-  int total_num_citations_neighborhood_clamped =
-      std::min((int)(hop1_size + hop2_size), total_num_citations_neighborhood);
-  num_citations_per_neighborhood[1] =
-      std::min((int)(total_num_citations_neighborhood_clamped * alpha),
-               (int)hop1_size);
-  num_citations_per_neighborhood[2] =
-      std::min(total_num_citations_neighborhood_clamped -
-                   num_citations_per_neighborhood[1],
-               (int)hop2_size);
-  return num_citations_per_neighborhood;
-}
-
-std::vector<int> NeighborhoodSearch::BinOutdegrees(
-    const std::vector<std::vector<int>> &binned_neighborhood,
-    int total_outdegree,
-    const std::vector<double> &binned_recency_probabilities) {
-  std::vector<int> binned_sizes(binned_neighborhood.size());
-  for (size_t i = 0; i < binned_neighborhood.size(); ++i) {
-    binned_sizes[i] = static_cast<int>(binned_neighborhood[i].size());
-  }
-  return BinOutdegrees(binned_sizes, total_outdegree, binned_recency_probabilities);
-}
-
-std::vector<int> NeighborhoodSearch::BinOutdegrees(
-    const std::vector<int> &binned_neighborhood_sizes,
-    int total_outdegree,
-    const std::vector<double> &binned_recency_probabilities) {
-  std::vector<int> target_outdegree_per_bin_map(this->num_bins, 0);
-  int remaining_outdegree = total_outdegree;
-  for (int bin_index = 0; bin_index < this->num_bins; bin_index++) {
-    if (remaining_outdegree == 0) {
-      break;
-    }
-    double bin_probability = ((size_t)bin_index < binned_recency_probabilities.size())
-                                 ? binned_recency_probabilities[bin_index]
-                                 : 0.0;
-    int current_bin_outdegree = std::round(total_outdegree * bin_probability);
-    current_bin_outdegree =
-        std::min(current_bin_outdegree, remaining_outdegree);
-    target_outdegree_per_bin_map[bin_index] = current_bin_outdegree;
-    remaining_outdegree -= current_bin_outdegree;
-  }
-  std::uniform_int_distribution<int> year_distribution{1, 5};
-  pcg32 &generator = Utils::GetThreadLocalPRNG();
-  while (remaining_outdegree > 0) {
-    int chosen_year = year_distribution(generator);
-    int current_bin_index = this->GetBinIndex(chosen_year);
-    if ((size_t)current_bin_index < target_outdegree_per_bin_map.size()) {
-      target_outdegree_per_bin_map[current_bin_index] += 1;
-    }
-    remaining_outdegree--;
-  }
-  for (int bin_index = 0; bin_index < this->num_bins; bin_index++) {
-    int binned_size = ((size_t)bin_index < binned_neighborhood_sizes.size())
-                          ? binned_neighborhood_sizes[bin_index]
-                          : 0;
-    int current_uncited_num_nodes =
-        target_outdegree_per_bin_map[bin_index] - binned_size;
-    if (current_uncited_num_nodes > 0) {
-      for (int sweep_index = bin_index - 1;
-           sweep_index >= 0 && current_uncited_num_nodes > 0; sweep_index--) {
-        int sweep_binned_size = (sweep_index < (int)binned_neighborhood_sizes.size())
-                                    ? binned_neighborhood_sizes[sweep_index]
-                                    : 0;
-        if (target_outdegree_per_bin_map[sweep_index] < sweep_binned_size) {
-          int current_citable = std::min(
-              current_uncited_num_nodes,
-              sweep_binned_size - target_outdegree_per_bin_map[sweep_index]);
-          current_uncited_num_nodes -= current_citable;
-          target_outdegree_per_bin_map[sweep_index] += current_citable;
-          target_outdegree_per_bin_map[bin_index] -= current_citable;
-        }
-      }
-      for (int sweep_index = bin_index + 1;
-           sweep_index < this->num_bins && current_uncited_num_nodes > 0;
-           sweep_index++) {
-        int sweep_binned_size = (sweep_index < (int)binned_neighborhood_sizes.size())
-                                    ? binned_neighborhood_sizes[sweep_index]
-                                    : 0;
-        if (target_outdegree_per_bin_map[sweep_index] < sweep_binned_size) {
-          int current_citable = std::min(
-              current_uncited_num_nodes,
-              sweep_binned_size - target_outdegree_per_bin_map[sweep_index]);
-          current_uncited_num_nodes -= current_citable;
-          target_outdegree_per_bin_map[sweep_index] += current_citable;
-          target_outdegree_per_bin_map[bin_index] -= current_citable;
-        }
-      }
-    }
-  }
-  return target_outdegree_per_bin_map;
-}
-
-int NeighborhoodSearch::GetBinIndex(int year_diff) {
-  if (year_diff >= 0 && (size_t)year_diff < this->recency_bin_lut.size()) {
-    return this->recency_bin_lut[year_diff];
+int NeighborhoodSearch::GetBinIndex(int year_diff) const {
+  if (year_diff >= 0 && static_cast<size_t>(year_diff) < recency_bin_lut_.size()) {
+    return recency_bin_lut_[year_diff];
   }
   if (year_diff < 0) {
     return 0;
   }
-  for (size_t i = 0; i < this->bin_boundaries.size() - 1; i++) {
-    if (this->bin_boundaries[i] <= year_diff &&
-        year_diff < this->bin_boundaries[i + 1]) {
+  for (size_t i = 0; i + 1 < bin_boundaries_.size(); ++i) {
+    if (bin_boundaries_[i] <= year_diff && year_diff < bin_boundaries_[i + 1]) {
       return static_cast<int>(i);
     }
   }
-  return static_cast<int>(this->bin_boundaries.size() - 1);
+  return static_cast<int>(bin_boundaries_.size()) - 1;
 }
 
-std::vector<std::vector<int>>
-NeighborhoodSearch::BinNeighborhood(Graph *graph, int current_year,
-                                    const std::vector<int> &n_hop_list) {
-  std::vector<std::vector<int>> binned_neighborhood(this->num_bins);
-  for (size_t i = 0; i < n_hop_list.size(); i++) {
-    int current_node = n_hop_list[i];
-    int current_bin = GetBinIndex(graph, current_node, current_year);
-    if ((size_t)current_bin < binned_neighborhood.size()) {
-      binned_neighborhood[current_bin].push_back(current_node);
+void NeighborhoodSearch::BinNeighborhood(const ladybug::LadyBugDB &db, int current_year,
+                                         std::span<const int> nodes,
+                                         std::vector<std::vector<int>> &bins) const {
+  bins.resize(num_bins);
+  for (auto &bin : bins) bin.clear();
+  for (int node : nodes) {
+    int bin = GetBinIndex(db, node, current_year);
+    if (bin >= 0 && bin < num_bins) {
+      bins[bin].push_back(node);
     }
   }
-  return binned_neighborhood;
 }
 
-std::vector<std::vector<int>>
-NeighborhoodSearch::GetNeighborhoodMap(Graph *graph, int current_year,
-                                       const std::vector<int> &generator_nodes,
-                                       int num_hops) {
-  if (this->use_alpha) {
-    // create distance 1 and distance 2 neighborhoods
-    return this->GetOneAndTwoDistanceNeighborhoods(graph, current_year,
-                                                   generator_nodes, num_hops);
-  } else {
-    return this->GetNHopNeighborhood(graph, current_year, generator_nodes,
-                                     num_hops);
-  }
-}
-
-std::vector<std::vector<int>>
-NeighborhoodSearch::GetOneAndTwoDistanceNeighborhoods(
-    Graph *graph, int current_year, const std::vector<int> &generator_nodes,
-    int num_hops) {
-  std::vector<std::vector<int>> n_hop_map(std::max(3, num_hops + 1));
-  thread_local ThreadLocalVisitedTracker visited;
+void NeighborhoodSearch::GetNeighborhoodMap(const ladybug::LadyBugDB &db, int32_t generator,
+                                            std::vector<std::vector<int>> &n_hop_map) const {
+  n_hop_map.resize(3);
+  for (auto &level : n_hop_map) level.clear();
+  thread_local NodeSet visited;
+  thread_local std::vector<int> one_hop;
   visited.Clear();
+  one_hop.clear();
+  const ladybug::BidirectionalCSR &csr = db.csr;
+  std::vector<int> &first = n_hop_map[1];
+  std::vector<int> &second = use_alpha_ ? n_hop_map[2] : n_hop_map[1];
 
-  if (this->neighborhood_sample == -1) {
-    thread_local std::vector<std::pair<int, int>> to_visit;
-    for (size_t i = 0; i < generator_nodes.size(); i++) {
-      int generator_node = generator_nodes[i];
-      to_visit.clear();
-      size_t head = 0;
-      to_visit.push_back({generator_node, 0});
-      visited.Insert(generator_node);
-      while (head < to_visit.size()) {
-        std::pair<int, int> current_pair = to_visit[head++];
-        int current_node = current_pair.first;
-        int current_distance = current_pair.second;
-        if (current_distance > 0) {
-          n_hop_map[current_distance].push_back(current_node);
-        }
-        if (current_distance < num_hops) {
-          for (int outgoing_neighbor : graph->GetOutNeighbors(current_node)) {
-            if (!visited.Contains(outgoing_neighbor)) {
-              visited.Insert(outgoing_neighbor);
-              to_visit.push_back({outgoing_neighbor, current_distance + 1});
-            }
-          }
-          for (int incoming_neighbor : graph->GetInNeighbors(current_node)) {
-            if (!visited.Contains(incoming_neighbor)) {
-              visited.Insert(incoming_neighbor);
-              to_visit.push_back({incoming_neighbor, current_distance + 1});
-            }
-          }
-        }
+  visited.Insert(generator);
+  for (int32_t x : csr.Out(generator)) {
+    if (visited.Insert(x)) one_hop.push_back(x);
+  }
+  for (int32_t x : csr.In(generator)) {
+    if (visited.Insert(x)) one_hop.push_back(x);
+  }
+
+  if (neighborhood_sample_ == -1) {
+    // Unbounded breadth-first search to distance 2.
+    first.insert(first.end(), one_hop.begin(), one_hop.end());
+    for (int u : one_hop) {
+      for (int32_t x : csr.Out(u)) {
+        if (visited.Insert(x)) second.push_back(x);
+      }
+      for (int32_t x : csr.In(u)) {
+        if (visited.Insert(x)) second.push_back(x);
       }
     }
-  } else {
-    // NOTE: only supports randomly sampling from up to 2-hop
-    n_hop_map[1].reserve(this->neighborhood_sample);
-    n_hop_map[2].reserve(this->neighborhood_sample);
-    size_t max_neighborhood_size = this->neighborhood_sample;
-    pcg32 &generator = Utils::GetThreadLocalPRNG();
-    for (size_t i = 0; i < generator_nodes.size(); i++) {
-      // get the 1-hop first
-      int generator_node = generator_nodes[i];
-      visited.Insert(generator_node);
-      std::vector<int> current_one_hop_neighborhood;
-      for (int outgoing_neighbor : graph->GetOutNeighbors(generator_node)) {
-        if (!visited.Contains(outgoing_neighbor)) {
-          current_one_hop_neighborhood.push_back(outgoing_neighbor);
-          visited.Insert(outgoing_neighbor);
-        }
-      }
-      for (int incoming_neighbor : graph->GetInNeighbors(generator_node)) {
-        if (!visited.Contains(incoming_neighbor)) {
-          current_one_hop_neighborhood.push_back(incoming_neighbor);
-          visited.Insert(incoming_neighbor);
-        }
-      }
-      // pick random nodes to get to 2-hop
-      if (current_one_hop_neighborhood.size() > max_neighborhood_size) {
-        std::vector<int> sampled_one_hop_neighborhood;
-        std::sample(current_one_hop_neighborhood.begin(),
-                    current_one_hop_neighborhood.end(),
-                    std::back_inserter(sampled_one_hop_neighborhood),
-                    max_neighborhood_size, generator);
-        current_one_hop_neighborhood = std::move(sampled_one_hop_neighborhood);
-      }
-      // until here should be fast
-      std::copy(current_one_hop_neighborhood.begin(),
-                current_one_hop_neighborhood.end(),
-                std::back_inserter(n_hop_map[1]));
-      std::shuffle(current_one_hop_neighborhood.begin(),
-                   current_one_hop_neighborhood.end(), generator);
-      for (size_t j = 0; j < current_one_hop_neighborhood.size(); j++) {
-        int u = current_one_hop_neighborhood[j];
-        auto out_nbrs = graph->GetOutNeighbors(u);
-        auto in_nbrs = graph->GetInNeighbors(u);
-        int current_two_hop_size = static_cast<int>(out_nbrs.size() + in_nbrs.size());
+    return;
+  }
 
-        // worst case for one node we might only grab the outgoing edges
-        if (n_hop_map[2].size() + current_two_hop_size <
-            max_neighborhood_size) {
-          for (int outgoing_neighbor : out_nbrs) {
-            if (!visited.Contains(outgoing_neighbor)) {
-              visited.Insert(outgoing_neighbor);
-              n_hop_map[2].push_back(outgoing_neighbor);
-            }
-          }
-          for (int incoming_neighbor : in_nbrs) {
-            if (!visited.Contains(incoming_neighbor)) {
-              visited.Insert(incoming_neighbor);
-              n_hop_map[2].push_back(incoming_neighbor);
-            }
-          }
-        } else {
-          std::vector<int> to_be_sampled_neighborhood;
-          for (int outgoing_neighbor : out_nbrs) {
-            if (!visited.Contains(outgoing_neighbor)) {
-              to_be_sampled_neighborhood.push_back(outgoing_neighbor);
-            }
-          }
-          for (int incoming_neighbor : in_nbrs) {
-            if (!visited.Contains(incoming_neighbor)) {
-              to_be_sampled_neighborhood.push_back(incoming_neighbor);
-            }
-          }
-          std::vector<int> sampled_neighborhood;
-          std::sample(to_be_sampled_neighborhood.begin(),
-                      to_be_sampled_neighborhood.end(),
-                      std::back_inserter(sampled_neighborhood),
-                      max_neighborhood_size - n_hop_map[2].size(), generator);
-          for (size_t k = 0; k < sampled_neighborhood.size(); k++) {
-            int sampled_node = sampled_neighborhood[k];
-            if (!visited.Contains(sampled_node)) {
-              visited.Insert(sampled_node);
-              n_hop_map[2].push_back(sampled_node);
-            }
-          }
-          if (n_hop_map[2].size() == max_neighborhood_size) {
-            visited.Clear();
-            return n_hop_map;
-          }
-        }
+  const size_t cap = static_cast<size_t>(neighborhood_sample_);
+  pcg32 &rng = rng::Thread();
+  if (one_hop.size() > cap) {
+    thread_local std::vector<int> sampled;
+    sampled.clear();
+    std::sample(one_hop.begin(), one_hop.end(), std::back_inserter(sampled), cap, rng);
+    one_hop.swap(sampled);
+  }
+  first.insert(first.end(), one_hop.begin(), one_hop.end());
+  std::shuffle(one_hop.begin(), one_hop.end(), rng);
+
+  for (int u : one_hop) {
+    std::span<const int32_t> out = csr.Out(u);
+    std::span<const int32_t> in = csr.In(u);
+    size_t degree = out.size() + in.size();
+    if (second.size() + degree < cap) {
+      for (int32_t x : out) {
+        if (visited.Insert(x)) second.push_back(x);
+      }
+      for (int32_t x : in) {
+        if (visited.Insert(x)) second.push_back(x);
+      }
+    } else {
+      size_t need = cap - std::min(cap, second.size());
+      SampleUnvisited(out, in, need, visited, second, rng);
+      if (second.size() == cap) {
+        return;
       }
     }
   }
-  visited.Clear();
-  return n_hop_map;
 }
 
-std::vector<std::vector<int>>
-NeighborhoodSearch::GetNHopNeighborhood(Graph *graph, int current_year,
-                                        const std::vector<int> &generator_nodes,
-                                        int num_hops) {
-  std::vector<std::vector<int>> n_hop_map(std::max(2, num_hops + 1));
-  std::vector<int> n_hop_neighborhood;
-  thread_local ThreadLocalVisitedTracker visited;
-  visited.Clear();
+std::vector<int> NeighborhoodSearch::GetNumCitationsPerNeighborhood(double alpha, int total,
+                                                                    size_t hop1_size,
+                                                                    size_t hop2_size) const {
+  std::vector<int> per_neighborhood(3, 0);
+  int clamped = std::min(static_cast<int>(hop1_size + hop2_size), total);
+  per_neighborhood[1] = std::min(static_cast<int>(clamped * alpha), static_cast<int>(hop1_size));
+  per_neighborhood[2] = std::min(clamped - per_neighborhood[1], static_cast<int>(hop2_size));
+  return per_neighborhood;
+}
 
-  if (this->neighborhood_sample == -1) {
-    thread_local std::vector<std::pair<int, int>> to_visit;
-    for (size_t i = 0; i < generator_nodes.size(); i++) {
-      int generator_node = generator_nodes[i];
-      to_visit.clear();
-      size_t head = 0;
-      to_visit.push_back({generator_node, 0});
-      visited.Insert(generator_node);
-      while (head < to_visit.size()) {
-        std::pair<int, int> current_pair = to_visit[head++];
-        int current_node = current_pair.first;
-        int current_distance = current_pair.second;
-        if (current_distance > 0) {
-          n_hop_neighborhood.push_back(current_node);
-        }
-        if (current_distance < num_hops) {
-          for (int outgoing_neighbor : graph->GetOutNeighbors(current_node)) {
-            if (!visited.Contains(outgoing_neighbor)) {
-              visited.Insert(outgoing_neighbor);
-              to_visit.push_back({outgoing_neighbor, current_distance + 1});
-            }
-          }
-          for (int incoming_neighbor : graph->GetInNeighbors(current_node)) {
-            if (!visited.Contains(incoming_neighbor)) {
-              visited.Insert(incoming_neighbor);
-              to_visit.push_back({incoming_neighbor, current_distance + 1});
-            }
-          }
-        }
+std::vector<int> NeighborhoodSearch::BinOutdegrees(
+    const std::vector<int> &bin_sizes, int total_outdegree,
+    const std::vector<double> &binned_recency_probabilities) const {
+  std::vector<int> target(num_bins, 0);
+  int remaining = total_outdegree;
+  for (int b = 0; b < num_bins; ++b) {
+    if (remaining == 0) break;
+    double p = (static_cast<size_t>(b) < binned_recency_probabilities.size())
+                   ? binned_recency_probabilities[b]
+                   : 0.0;
+    int quota = static_cast<int>(std::round(total_outdegree * p));
+    quota = std::min(quota, remaining);
+    target[b] = quota;
+    remaining -= quota;
+  }
+  std::uniform_int_distribution<int> year_distribution{1, 5};
+  pcg32 &generator = rng::Thread();
+  while (remaining > 0) {
+    int bin = GetBinIndex(year_distribution(generator));
+    if (static_cast<size_t>(bin) < target.size()) {
+      target[bin] += 1;
+    }
+    remaining--;
+  }
+  auto size_of = [&](int b) {
+    return (static_cast<size_t>(b) < bin_sizes.size()) ? bin_sizes[b] : 0;
+  };
+  for (int b = 0; b < num_bins; ++b) {
+    int uncited = target[b] - size_of(b);
+    if (uncited <= 0) continue;
+    for (int s = b - 1; s >= 0 && uncited > 0; --s) {
+      if (target[s] < size_of(s)) {
+        int citable = std::min(uncited, size_of(s) - target[s]);
+        uncited -= citable;
+        target[s] += citable;
+        target[b] -= citable;
       }
     }
-  } else {
-    // NOTE: only supports randomly sampling from up to 2-hop
-    n_hop_neighborhood.reserve(this->neighborhood_sample);
-    size_t max_neighborhood_size = this->neighborhood_sample;
-    pcg32 &generator = Utils::GetThreadLocalPRNG();
-    for (size_t i = 0; i < generator_nodes.size(); i++) {
-      // get the 1-hop first
-      int generator_node = generator_nodes[i];
-      visited.Insert(generator_node);
-      std::vector<int> current_one_hop_neighborhood;
-      for (int outgoing_neighbor : graph->GetOutNeighbors(generator_node)) {
-        if (!visited.Contains(outgoing_neighbor)) {
-          current_one_hop_neighborhood.push_back(outgoing_neighbor);
-          visited.Insert(outgoing_neighbor);
-        }
-      }
-      for (int incoming_neighbor : graph->GetInNeighbors(generator_node)) {
-        if (!visited.Contains(incoming_neighbor)) {
-          current_one_hop_neighborhood.push_back(incoming_neighbor);
-          visited.Insert(incoming_neighbor);
-        }
-      }
-      // pick random nodes to get to 2-hop
-      if (current_one_hop_neighborhood.size() > max_neighborhood_size) {
-        std::vector<int> sampled_one_hop_neighborhood;
-        std::sample(current_one_hop_neighborhood.begin(),
-                    current_one_hop_neighborhood.end(),
-                    std::back_inserter(sampled_one_hop_neighborhood),
-                    max_neighborhood_size, generator);
-        current_one_hop_neighborhood = std::move(sampled_one_hop_neighborhood);
-      }
-      // until here should be fast
-      std::copy(current_one_hop_neighborhood.begin(),
-                current_one_hop_neighborhood.end(),
-                std::back_inserter(n_hop_neighborhood));
-      std::shuffle(current_one_hop_neighborhood.begin(),
-                   current_one_hop_neighborhood.end(), generator);
-      for (size_t j = 0; j < current_one_hop_neighborhood.size(); j++) {
-        int u = current_one_hop_neighborhood[j];
-        auto out_nbrs = graph->GetOutNeighbors(u);
-        auto in_nbrs = graph->GetInNeighbors(u);
-        int current_two_hop_size = static_cast<int>(out_nbrs.size() + in_nbrs.size());
-
-        // worst case for one node we might only grab the outgoing edges
-        if (n_hop_neighborhood.size() + current_two_hop_size <
-            max_neighborhood_size) {
-          for (int outgoing_neighbor : out_nbrs) {
-            if (!visited.Contains(outgoing_neighbor)) {
-              visited.Insert(outgoing_neighbor);
-              n_hop_neighborhood.push_back(outgoing_neighbor);
-            }
-          }
-          for (int incoming_neighbor : in_nbrs) {
-            if (!visited.Contains(incoming_neighbor)) {
-              visited.Insert(incoming_neighbor);
-              n_hop_neighborhood.push_back(incoming_neighbor);
-            }
-          }
-        } else {
-          std::vector<int> to_be_sampled_neighborhood;
-          for (int outgoing_neighbor : out_nbrs) {
-            if (!visited.Contains(outgoing_neighbor)) {
-              to_be_sampled_neighborhood.push_back(outgoing_neighbor);
-            }
-          }
-          for (int incoming_neighbor : in_nbrs) {
-            if (!visited.Contains(incoming_neighbor)) {
-              to_be_sampled_neighborhood.push_back(incoming_neighbor);
-            }
-          }
-          std::vector<int> sampled_neighborhood;
-          std::sample(to_be_sampled_neighborhood.begin(),
-                      to_be_sampled_neighborhood.end(),
-                      std::back_inserter(sampled_neighborhood),
-                      max_neighborhood_size - n_hop_neighborhood.size(),
-                      generator);
-          for (size_t k = 0; k < sampled_neighborhood.size(); k++) {
-            int sampled_node = sampled_neighborhood[k];
-            if (!visited.Contains(sampled_node)) {
-              visited.Insert(sampled_node);
-              n_hop_neighborhood.push_back(sampled_node);
-            }
-          }
-          if (n_hop_neighborhood.size() == max_neighborhood_size) {
-            visited.Clear();
-            n_hop_map[1] = std::move(n_hop_neighborhood);
-            return n_hop_map;
-          }
-        }
+    for (int s = b + 1; s < num_bins && uncited > 0; ++s) {
+      if (target[s] < size_of(s)) {
+        int citable = std::min(uncited, size_of(s) - target[s]);
+        uncited -= citable;
+        target[s] += citable;
+        target[b] -= citable;
       }
     }
   }
-  visited.Clear();
-  n_hop_map[1] = std::move(n_hop_neighborhood);
-  return n_hop_map;
-}
-
-int NeighborhoodSearch::GetBinIndex(Graph *graph, int current_node,
-                                    int current_year) {
-  int current_diff = current_year - graph->GetYear(current_node);
-  return this->GetBinIndex(current_diff);
+  return target;
 }

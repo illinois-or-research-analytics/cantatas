@@ -1,0 +1,6 @@
+foreach(test_name test_csr test_ingest_snapshot test_neighborhood test_hash_set)
+    add_executable(${test_name} ${test_name}.cpp)
+    target_link_libraries(${test_name} PRIVATE cantatas_core)
+    target_include_directories(${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()

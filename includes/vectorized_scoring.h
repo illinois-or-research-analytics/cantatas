@@ -2,15 +2,13 @@
 #define VECTORIZED_SCORING_H
 
 #include "structs.h"
+#include <algorithm>
 #include <cstddef>
 #include <span>
 #include <vector>
 
 namespace ladybug {
 
-/*
- * Scratchpad buffer for vectorized preference score calculations.
- */
 struct ScoringScratchpad {
   std::vector<double> raw_pa;
   std::vector<double> raw_fit;
@@ -30,30 +28,15 @@ struct ScoringScratchpad {
   }
 };
 
-/*
- * VectorizedScoring: AVX2 / OpenMP SIMD accelerated multi-component preference scoring.
- * Evaluates Preferential Attachment (PA), Temporal Fitness, Team Size, and Author Reputation
- * directly against contiguous columnar buffers with zero memory allocation.
- */
 class VectorizedScoring {
 public:
-  // Computes normalized candidate weights in O(K) time using SIMD registers
-  static void ComputeCandidateWeights(
-      const std::vector<int> &candidate_nodes,
-      const std::vector<int> &continuous_node_mapping,
-      const NodeMetrics &metrics,
-      const AgentWeights &weights,
-      ScoringScratchpad &scratch,
-      std::span<double> &out_weights);
-
-  // SIMD batch score computation directly on contiguous node slices
-  static void BatchComputeScores(
-      std::span<const double> pa_span,
-      std::span<const double> fit_span,
-      std::span<const double> na_span,
-      std::span<const double> ar_span,
-      const AgentWeights &weights,
-      std::span<double> out_scores);
+  // Weight of each candidate: sum over the four components of
+  // agent_weight * component / (sum of that component over the candidates).
+  static void ComputeCandidateWeights(std::span<const int> candidate_nodes,
+                                      const NodeMetrics &metrics,
+                                      const AgentWeights &weights,
+                                      ScoringScratchpad &scratch,
+                                      std::span<double> &out_weights);
 };
 
 } // namespace ladybug

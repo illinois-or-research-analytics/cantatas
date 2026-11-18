@@ -1,384 +1,53 @@
 #include "ladybug/ladybug_db.h"
-#include "graph.h"
-#include "utils.h"
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <random>
-#include <sstream>
+#include "ladybug/ladybug_parallel.h"
+
+#include <omp.h>
+
+#include <algorithm>
+#include <cstring>
 
 namespace ladybug {
 
-LadyBugDB::LadyBugDB() : mode_(MmapMode::ReadWrite) {}
-
-LadyBugDB::~LadyBugDB() {
-  Close();
-}
-
-LadyBugDB::LadyBugDB(LadyBugDB &&other) noexcept
-    : db_dir_(std::move(other.db_dir_)),
-      mode_(other.mode_),
-      manifest_(other.manifest_),
-      node_store_(std::move(other.node_store_)),
-      csr_(std::move(other.csr_)),
-      cluster_index_(std::move(other.cluster_index_)),
-      author_store_(std::move(other.author_store_)),
-      journal_(std::move(other.journal_)),
-      num_authors_bag_vec_(std::move(other.num_authors_bag_vec_)) {}
-
-LadyBugDB &LadyBugDB::operator=(LadyBugDB &&other) noexcept {
-  if (this != &other) {
-    Close();
-    db_dir_ = std::move(other.db_dir_);
-    mode_ = other.mode_;
-    manifest_ = other.manifest_;
-    node_store_ = std::move(other.node_store_);
-    csr_ = std::move(other.csr_);
-    cluster_index_ = std::move(other.cluster_index_);
-    author_store_ = std::move(other.author_store_);
-    journal_ = std::move(other.journal_);
-    num_authors_bag_vec_ = std::move(other.num_authors_bag_vec_);
+void ClusterIndex::Rebuild(std::span<const int32_t> cluster_of_node, size_t num_nodes) {
+  num_nodes = std::min(num_nodes, cluster_of_node.size());
+  int32_t max_cluster = -1;
+#pragma omp parallel for reduction(max : max_cluster) schedule(static)
+  for (size_t v = 0; v < num_nodes; ++v) {
+    max_cluster = std::max(max_cluster, cluster_of_node[v]);
   }
-  return *this;
-}
+  const size_t num_clusters = static_cast<size_t>(max_cluster + 1);
 
-void LadyBugDB::Open(const std::string &db_dir, MmapMode mode,
-                     size_t initial_nodes, size_t initial_edges,
-                     int author_max_lifetime) {
-  Close();
-  db_dir_ = db_dir;
-  mode_ = mode;
-
-  std::filesystem::create_directories(db_dir_);
-
-  node_store_.Open(db_dir_ + "/nodes", mode, initial_nodes);
-  csr_.Open(db_dir_ + "/graph", mode, initial_nodes, initial_edges);
-  cluster_index_.Open(db_dir_ + "/clusters", mode);
-  author_store_.Open(db_dir_ + "/authors", mode, author_max_lifetime);
-  journal_.Open(db_dir_ + "/delta_journal.bin", mode);
-
-  LoadManifest();
-}
-
-void LadyBugDB::Close() {
-  Sync(false);
-  node_store_.Close();
-  csr_.Close();
-  cluster_index_.Close();
-  author_store_.Close();
-  journal_.Close();
-}
-
-void LadyBugDB::Sync(bool async) {
-  node_store_.Sync(async);
-  csr_.Sync(async);
-  cluster_index_.Sync(async);
-  author_store_.Sync(async);
-  journal_.Sync(async);
-}
-
-void LadyBugDB::ReadNumAuthorsBag(const std::string &bag_csv) {
-  if (bag_csv.empty()) return;
-  std::ifstream file(bag_csv);
-  if (!file.is_open()) return;
-
-  num_authors_bag_vec_.clear();
-  std::string line;
-  int line_no = 0;
-  while (std::getline(file, line)) {
-    if (line.empty()) continue;
-    std::stringstream ss(line);
-    std::string val1, val2;
-    if (std::getline(ss, val1, ',') && std::getline(ss, val2, ',')) {
-      if (!val2.empty() && val2.back() == '\r') val2.pop_back();
-      if (line_no != 0) {
-        num_authors_bag_vec_.push_back(std::stoi(val2));
-      }
-    }
-    line_no++;
-  }
-}
-
-int LadyBugDB::GetNextNumAuthors() {
-  if (num_authors_bag_vec_.empty()) {
-    return 1;
-  }
-  std::uniform_int_distribution<int> dist{0, static_cast<int>(num_authors_bag_vec_.size() - 1)};
-  pcg32 &generator = Utils::GetThreadLocalPRNG();
-  return num_authors_bag_vec_[dist(generator)];
-}
-
-void LadyBugDB::IngestSeedData(const std::string &nodelist_csv,
-                               const std::string &edgelist_csv,
-                               const std::string &cluster_csv,
-                               const std::string &num_authors_bag_csv,
-                               bool is_checkpoint) {
-  if (!num_authors_bag_csv.empty()) {
-    ReadNumAuthorsBag(num_authors_bag_csv);
-  }
-
-  // 1. Ingest Nodelist
-  node_store_.IngestCSV(nodelist_csv, is_checkpoint);
-
-  // 2. Ingest Edgelist
-  csr_.IngestCSV(edgelist_csv, node_store_.GetNodeCount());
-
-  // Update in/out degrees in node store based on CSR
-  for (size_t u = 0; u < node_store_.GetNodeCount(); ++u) {
-    node_store_.SetInDegree(u, static_cast<uint32_t>(csr_.GetInDegree(u)));
-    node_store_.SetOutDegree(u, static_cast<uint32_t>(csr_.GetOutDegree(u)));
-  }
-
-  // 3. Ingest Clusters
-  if (!cluster_csv.empty()) {
-    cluster_index_.IngestCSV(cluster_csv);
-    for (size_t u = 0; u < node_store_.GetNodeCount(); ++u) {
-      int cid = node_store_.GetClusterId(u);
-      if (cid >= 0) {
-        cluster_index_.AddNodeToCluster(u, cid);
-      }
+  offsets_.Clear();
+  offsets_.Resize(num_clusters + 1, 0);
+  uint64_t *off = offsets_.data();
+#pragma omp parallel for schedule(static)
+  for (size_t v = 0; v < num_nodes; ++v) {
+    int32_t c = cluster_of_node[v];
+    if (c >= 0) {
+      __atomic_fetch_add(&off[c], 1, __ATOMIC_RELAXED);
     }
   }
+  const uint64_t total = ExclusiveScanInPlace(off, num_clusters + 1);
 
-  // 4. Initialize Authorship
-  if (!is_checkpoint) {
-    std::vector<std::pair<int, int>> node_years;
-    node_years.reserve(node_store_.GetNodeCount());
-    for (size_t u = 0; u < node_store_.GetNodeCount(); ++u) {
-      if (node_store_.GetType(u) == NodeType::Seed) {
-        node_years.push_back({static_cast<int>(u), node_store_.GetYear(u)});
-      }
-    }
-    std::sort(node_years.begin(), node_years.end(),
-              [](const std::pair<int, int> &a, const std::pair<int, int> &b) {
-                return a.second < b.second;
-              });
-
-    size_t prev_idx = 0;
-    int prev_yr = node_years.empty() ? 0 : node_years[0].second;
-
-    for (size_t i = 0; i < node_years.size(); ++i) {
-      int u = node_years[i].first;
-      int yr = node_years[i].second;
-      int author_id = author_store_.GetNextAuthor(yr, {});
-      node_store_.SetAuthorId(u, author_id);
-      author_store_.UpdateAuthorPublication(author_id, u);
-
-      if (prev_yr != yr) {
-        for (size_t j = prev_idx; j < i; ++j) {
-          int n = node_years[j].first;
-          int auth = node_store_.GetAuthorId(n);
-          node_store_.SetInitialAuthorReputation(n, author_store_.ComputeSingleAuthorReputation(auth, node_store_));
-        }
-        prev_idx = i;
-        prev_yr = yr;
-      }
-    }
-
-    if (prev_idx < node_years.size()) {
-      for (size_t j = prev_idx; j < node_years.size(); ++j) {
-        int n = node_years[j].first;
-        int auth = node_store_.GetAuthorId(n);
-        node_store_.SetInitialAuthorReputation(n, author_store_.ComputeSingleAuthorReputation(auth, node_store_));
-      }
-    }
-  } else {
-    for (size_t u = 0; u < node_store_.GetNodeCount(); ++u) {
-      int auth = node_store_.GetAuthorId(u);
-      int yr = node_store_.GetYear(u);
-      if (auth >= 0) {
-        author_store_.SetAuthorBirthYear(auth, yr);
-        author_store_.UpdateAuthorPublication(auth, u);
-        int cart = node_store_.GetCartelId(u);
-        if (cart != -1) {
-          author_store_.SetCartelID(auth, cart);
-        }
-        author_store_.SetNextAuthorId(std::max(author_store_.GetNextAuthorId(), auth + 1));
-      }
-    }
-    author_store_.ComputeAuthorReputations(node_store_);
+  members_.Clear();
+  members_.ResizeUninitialized(total);
+  Column<uint64_t> cursor;
+  cursor.ResizeUninitialized(num_clusters);
+  if (num_clusters > 0) {
+    std::memcpy(cursor.data(), off, num_clusters * sizeof(uint64_t));
   }
-
-  manifest_.node_count = node_store_.GetNodeCount();
-  manifest_.edge_count = csr_.GetEdgeCount();
-  manifest_.next_author_id = author_store_.GetNextAuthorId();
-  manifest_.last_commit_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::system_clock::now().time_since_epoch())
-                                        .count();
-
-  Sync(false);
-  SaveManifest();
+  // Sequential so each member list is in increasing node order.
+  for (size_t v = 0; v < num_nodes; ++v) {
+    int32_t c = cluster_of_node[v];
+    if (c >= 0) {
+      members_[cursor[c]++] = static_cast<int32_t>(v);
+    }
+  }
 }
 
-void LadyBugDB::IngestFromGraph(const ::Graph &graph) {
-  size_t n_nodes = 0;
-  for (int u : graph.GetNodeSet()) {
-    if (static_cast<size_t>(u) >= n_nodes) {
-      n_nodes = static_cast<size_t>(u) + 1;
-    }
-  }
-
-  node_store_.SetNodeCount(n_nodes);
-
-  // 1. Populate NodeStore & Clusters
-  for (int u : graph.GetNodeSet()) {
-    node_store_.SetYear(u, graph.GetYear(u));
-    node_store_.SetType(u, static_cast<NodeType>(graph.GetType(u)));
-    node_store_.SetAlpha(u, graph.GetAlpha(u));
-    node_store_.SetPaWeight(u, graph.GetPaWeight(u));
-    node_store_.SetFitWeight(u, graph.GetFitWeight(u));
-    node_store_.SetNumAuthorsWeight(u, graph.GetNumAuthorsWeight(u));
-    node_store_.SetAuthorRepWeight(u, graph.GetAuthorReputationWeight(u));
-    node_store_.SetFitnessLagDuration(u, graph.GetFitnessLagDuration(u));
-    node_store_.SetFitnessPeakValue(u, graph.GetFitnessPeakValue(u));
-    node_store_.SetFitnessPeakDuration(u, graph.GetFitnessPeakDuration(u));
-    node_store_.SetInDegree(u, graph.GetInDegree(u));
-    node_store_.SetOutDegree(u, graph.GetOutDegree(u));
-    node_store_.SetAssignedOutDegree(u, graph.GetAssignedOutDegree(u));
-    node_store_.SetPlantedLineNumber(u, graph.GetPlantedNodesLineNumber(u));
-    node_store_.SetSampledNeighborhoodSize(u, graph.GetSampledNeighborhoodSize(u));
-    node_store_.SetFullyRandomCitations(u, graph.GetFullyRandomCitations(u));
-    node_store_.SetAuthorId(u, graph.GetAuthorId(u));
-    node_store_.SetNumAuthors(u, graph.GetNumAuthors(u));
-    node_store_.SetInitialAuthorReputation(u, graph.GetInitialAuthorReputation(u));
-    node_store_.SetCartelId(u, graph.GetCartelIdAttr(u));
-    node_store_.SetGeneratorNode(u, -1);
-    int cid = graph.GetCommunityAssignment(u);
-    node_store_.SetClusterId(u, cid);
-    if (cid >= 0) {
-      cluster_index_.AddNodeToCluster(u, cid);
-    }
-  }
-
-  // 2. Build Bidirectional CSR directly from in-memory adjacency lists
-  csr_.BuildFromAdjLists(n_nodes, graph.GetForwardAdjList(), graph.GetBackwardAdjList());
-
-  // 3. Sync Author Store & Cartels
-  author_store_.SetNextAuthorId(graph.GetNextAuthorId());
-  author_store_.SetAuthorBirthYearMap(graph.GetAuthorBirthYearMap());
-  author_store_.SetAuthorPublicationMap(graph.GetAuthorPublicationMap());
-  author_store_.SetPublicationCountToAuthorMap(graph.GetPublicationCountToAuthorMap());
-  for (int cartel_id : graph.GetCartelSet()) {
-    for (int author : graph.GetCartelAuthors(cartel_id)) {
-      author_store_.SetCartelID(author, cartel_id);
-    }
-  }
-  author_store_.ComputeAuthorReputations(csr_);
-
-  // 4. Update Manifest
-  manifest_.node_count = node_store_.GetNodeCount();
-  manifest_.edge_count = csr_.GetEdgeCount();
-  manifest_.next_author_id = author_store_.GetNextAuthorId();
-  manifest_.last_commit_timestamp =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count();
-
-  Sync(false);
-  SaveManifest();
-}
-
-void LadyBugDB::Checkpoint(int current_year) {
-  // 1. Merge incoming delta buffer into Backward CSR
-  csr_.MergeAnnualDeltaBuffer();
-
-  // 2. Recompute author reputations
-  author_store_.ComputeAuthorReputations(csr_);
-
-  // 3. Log commit to journal and sync
-  journal_.AppendCommit(current_year, node_store_.GetNodeCount(), csr_.GetEdgeCount());
-  Sync(false);
-
-  // 4. Update and atomically write manifest.json
-  manifest_.current_year = current_year;
-  manifest_.node_count = node_store_.GetNodeCount();
-  manifest_.edge_count = csr_.GetEdgeCount();
-  manifest_.next_author_id = author_store_.GetNextAuthorId();
-  manifest_.last_commit_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::system_clock::now().time_since_epoch())
-                                        .count();
-  manifest_.status = "valid";
-
-  SaveManifest();
-
-  // 5. Prune / reset delta journal on successful commit (zero-bloat)
-  journal_.Truncate();
-}
-
-bool LadyBugDB::Recover(int target_year) {
-  if (!LoadManifest()) {
-    return false;
-  }
-  if (manifest_.status != "valid") {
-    return false;
-  }
-
-  // If a target year is requested, verify match
-  if (target_year >= 0 && manifest_.current_year != target_year) {
-    std::cout << "[LadyBugDB::Recover] Warning: Manifest current_year ("
-              << manifest_.current_year << ") != target_year (" << target_year << ")\n";
-  }
-
-  // Restore node and CSR counts from manifest
-  if (manifest_.node_count > 0) {
-    node_store_.SetNodeCount(manifest_.node_count);
-    csr_.Restore(manifest_.node_count, manifest_.edge_count);
-  }
-
-  return true;
-}
-
-void LadyBugDB::SaveManifest() {
-  std::string manifest_path = db_dir_ + "/manifest.json";
-  std::string tmp_path = db_dir_ + "/manifest.json.tmp";
-
-  std::ofstream f(tmp_path);
-  if (!f.is_open()) return;
-
-  f << "{\n"
-    << "  \"version\": " << manifest_.version << ",\n"
-    << "  \"current_year\": " << manifest_.current_year << ",\n"
-    << "  \"node_count\": " << manifest_.node_count << ",\n"
-    << "  \"edge_count\": " << manifest_.edge_count << ",\n"
-    << "  \"next_author_id\": " << manifest_.next_author_id << ",\n"
-    << "  \"last_commit_timestamp\": " << manifest_.last_commit_timestamp << ",\n"
-    << "  \"status\": \"" << manifest_.status << "\"\n"
-    << "}\n";
-  f.close();
-
-  std::filesystem::rename(tmp_path, manifest_path);
-}
-
-bool LadyBugDB::LoadManifest() {
-  std::string manifest_path = db_dir_ + "/manifest.json";
-  std::ifstream f(manifest_path);
-  if (!f.is_open()) {
-    return false;
-  }
-
-  std::string line;
-  while (std::getline(f, line)) {
-    if (line.find("\"current_year\"") != std::string::npos) {
-      size_t pos = line.find(':');
-      if (pos != std::string::npos) manifest_.current_year = std::stoi(line.substr(pos + 1));
-    } else if (line.find("\"node_count\"") != std::string::npos) {
-      size_t pos = line.find(':');
-      if (pos != std::string::npos) manifest_.node_count = std::stoull(line.substr(pos + 1));
-    } else if (line.find("\"edge_count\"") != std::string::npos) {
-      size_t pos = line.find(':');
-      if (pos != std::string::npos) manifest_.edge_count = std::stoull(line.substr(pos + 1));
-    } else if (line.find("\"next_author_id\"") != std::string::npos) {
-      size_t pos = line.find(':');
-      if (pos != std::string::npos) manifest_.next_author_id = std::stoi(line.substr(pos + 1));
-    } else if (line.find("\"last_commit_timestamp\"") != std::string::npos) {
-      size_t pos = line.find(':');
-      if (pos != std::string::npos) manifest_.last_commit_timestamp = std::stoull(line.substr(pos + 1));
-    } else if (line.find("\"status\"") != std::string::npos) {
-      if (line.find("valid") != std::string::npos) manifest_.status = "valid";
-    }
-  }
-  return true;
+void LadyBugDB::ReserveFinalSize(size_t nodes_hint, uint64_t edges_hint) {
+  csr.Reserve(nodes_hint, edges_hint);
+  nodes.ForEach([&](const char *, auto &column) { column.Reserve(nodes_hint); });
 }
 
 } // namespace ladybug

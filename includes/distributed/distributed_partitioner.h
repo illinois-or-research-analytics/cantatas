@@ -1,64 +1,37 @@
 #ifndef DISTRIBUTED_PARTITIONER_H
 #define DISTRIBUTED_PARTITIONER_H
 
-#include "ladybug/ladybug_cluster_index.h"
-#include "ladybug/ladybug_node_store.h"
-#include <cstddef>
+#include "ladybug/ladybug_db.h"
+
 #include <cstdint>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace distributed {
 
 /*
- * DistributedPartitioner: Shards the global citation network across MPI compute nodes
- * along dense Leiden research community boundaries.
- * Minimizes cross-rank network boundary traffic by keeping ~90% of intra-field
- * citation resolutions purely within local node memory.
+ * DistributedPartitioner: decides which rank simulates which agents.
+ *
+ * Clusters are assigned to ranks by greedy longest-processing-time on cluster
+ * size, so each rank simulates the agents of its clusters and builds recency
+ * bins only for those clusters. Agents without a cluster are spread by node
+ * ID. Because every agent has its own random stream, the assignment affects
+ * only load balance, never results.
  */
 class DistributedPartitioner {
 public:
-  DistributedPartitioner();
-  ~DistributedPartitioner();
-
-  DistributedPartitioner(const DistributedPartitioner &) = delete;
-  DistributedPartitioner &operator=(const DistributedPartitioner &) = delete;
-
-  DistributedPartitioner(DistributedPartitioner &&) noexcept = default;
-  DistributedPartitioner &operator=(DistributedPartitioner &&) noexcept = default;
-
-  // Partition Leiden clusters across world_size ranks to balance node counts
-  void PartitionCommunities(int world_size, int my_rank,
-                            const ladybug::LadyBugClusterIndex &cluster_index,
-                            const ladybug::LadyBugNodeStore &node_store);
-
-  // Set manual mapping for testing
-  void SetClusterRank(int cluster_id, int rank);
-
-  // Lookups
-  int GetOwnerRank(int cluster_id) const noexcept;
-  int GetNodeOwnerRank(int node_id, const ladybug::LadyBugNodeStore &node_store) const noexcept;
-  bool IsLocalCluster(int cluster_id) const noexcept;
-  bool IsLocalClusterOrNode(int cluster_id, int node_id) const noexcept;
-  bool IsLocalNode(int node_id, const ladybug::LadyBugNodeStore &node_store) const noexcept;
-
-  int GetMyRank() const noexcept { return my_rank_; }
-  int GetWorldSize() const noexcept { return world_size_; }
-
-  const std::vector<int> &GetMyAssignedClusters() const noexcept { return my_clusters_; }
-  size_t GetAssignedNodeCount() const noexcept { return assigned_node_count_; }
-
-  // Dynamic actor sub-partition rebalancing for asymmetric disciplinary growth
-  void RebalancePartitions(const std::vector<size_t> &cluster_weights);
+  void Partition(int world_size, int rank, const ladybug::LadyBugDB &db);
+  bool IsLocal(int32_t cluster, int32_t node) const noexcept {
+    if (world_size_ <= 1) return true;
+    if (cluster >= 0 && static_cast<size_t>(cluster) < owner_.size()) {
+      return owner_[cluster] == rank_;
+    }
+    return (node % world_size_) == rank_;
+  }
 
 private:
-  int world_size_;
-  int my_rank_;
-  size_t assigned_node_count_;
-
-  std::unordered_map<int, int> cluster_to_rank_;
-  std::vector<int> my_clusters_;
+  int world_size_ = 1;
+  int rank_ = 0;
+  std::vector<int32_t> owner_; // owner_[cluster] = rank
 };
 
 } // namespace distributed

@@ -1,466 +1,161 @@
 #include "ladybug/ladybug_csr.h"
-#include <algorithm>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
+#include "ladybug/ladybug_parallel.h"
+
 #include <omp.h>
-#include <sstream>
+
+#include <cstring>
 #include <stdexcept>
 
 namespace ladybug {
 
-namespace {
-char DetectDelimiter(const std::string &filepath) {
-  std::ifstream f(filepath);
-  std::string line;
-  if (std::getline(f, line)) {
-    if (line.find(',') != std::string::npos) return ',';
-    if (line.find('\t') != std::string::npos) return '\t';
-    if (line.find(' ') != std::string::npos) return ' ';
+BidirectionalCSR::BidirectionalCSR() {
+  fwd_offsets_.Resize(1, 0);
+  bwd_offsets_.Resize(1, 0);
+}
+
+void BidirectionalCSR::Reserve(size_t nodes, uint64_t edges) {
+  fwd_offsets_.Reserve(nodes + 1);
+  bwd_offsets_.Reserve(nodes + 1);
+  fwd_targets_.Reserve(edges);
+  bwd_sources_.Reserve(edges);
+}
+
+void BidirectionalCSR::Build(size_t num_nodes, std::span<const int32_t> src,
+                             std::span<const int32_t> dst) {
+  if (src.size() != dst.size()) {
+    throw std::invalid_argument("BidirectionalCSR::Build: src/dst size mismatch");
   }
-  return ',';
-}
-} // namespace
+  const size_t m = src.size();
+  num_nodes_ = num_nodes;
+  fwd_offsets_.Clear();
+  bwd_offsets_.Clear();
+  fwd_offsets_.Resize(num_nodes + 1, 0);
+  bwd_offsets_.Resize(num_nodes + 1, 0);
 
-LadyBugBidirectionalCSR::LadyBugBidirectionalCSR()
-    : num_nodes_(0), num_edges_(0), mode_(MmapMode::ReadWrite) {
-  SetThreadCount(omp_get_max_threads());
-}
-
-LadyBugBidirectionalCSR::~LadyBugBidirectionalCSR() {
-  Close();
-}
-
-LadyBugBidirectionalCSR::LadyBugBidirectionalCSR(LadyBugBidirectionalCSR &&other) noexcept
-    : db_dir_(std::move(other.db_dir_)),
-      num_nodes_(other.num_nodes_),
-      num_edges_(other.num_edges_),
-      mode_(other.mode_),
-      fwd_offsets_(std::move(other.fwd_offsets_)),
-      fwd_edges_(std::move(other.fwd_edges_)),
-      bwd_offsets_(std::move(other.bwd_offsets_)),
-      bwd_edges_(std::move(other.bwd_edges_)),
-      thread_delta_buffers_(std::move(other.thread_delta_buffers_)) {
-  other.num_nodes_ = 0;
-  other.num_edges_ = 0;
-}
-
-LadyBugBidirectionalCSR &LadyBugBidirectionalCSR::operator=(LadyBugBidirectionalCSR &&other) noexcept {
-  if (this != &other) {
-    Close();
-    db_dir_ = std::move(other.db_dir_);
-    num_nodes_ = other.num_nodes_;
-    num_edges_ = other.num_edges_;
-    mode_ = other.mode_;
-    fwd_offsets_ = std::move(other.fwd_offsets_);
-    fwd_edges_ = std::move(other.fwd_edges_);
-    bwd_offsets_ = std::move(other.bwd_offsets_);
-    bwd_edges_ = std::move(other.bwd_edges_);
-    thread_delta_buffers_ = std::move(other.thread_delta_buffers_);
-
-    other.num_nodes_ = 0;
-    other.num_edges_ = 0;
+  uint64_t *fwd_off = fwd_offsets_.data();
+  uint64_t *bwd_off = bwd_offsets_.data();
+#pragma omp parallel for schedule(static)
+  for (size_t i = 0; i < m; ++i) {
+    __atomic_fetch_add(&fwd_off[src[i]], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&bwd_off[dst[i]], 1, __ATOMIC_RELAXED);
   }
-  return *this;
-}
+  ExclusiveScanInPlace(fwd_off, num_nodes + 1);
+  ExclusiveScanInPlace(bwd_off, num_nodes + 1);
 
-void LadyBugBidirectionalCSR::Open(const std::string &db_dir, MmapMode mode,
-                                   size_t initial_nodes, size_t initial_edges) {
-  Close();
-  db_dir_ = db_dir;
-  mode_ = mode;
+  fwd_targets_.Clear();
+  bwd_sources_.Clear();
+  fwd_targets_.ResizeUninitialized(m);
+  bwd_sources_.ResizeUninitialized(m);
 
-  std::filesystem::create_directories(db_dir_);
-
-  size_t offset_cap = std::max(initial_nodes + 1, static_cast<size_t>(1024));
-  size_t edge_cap = std::max(initial_edges, static_cast<size_t>(4096));
-
-  fwd_offsets_.Open(db_dir_ + "/csr_fwd_offsets.bin", mode_, offset_cap);
-  fwd_edges_.Open(db_dir_ + "/csr_fwd_edges.bin", mode_, edge_cap);
-  bwd_offsets_.Open(db_dir_ + "/csr_bwd_offsets.bin", mode_, offset_cap);
-  bwd_edges_.Open(db_dir_ + "/csr_bwd_edges.bin", mode_, edge_cap);
-
-  num_nodes_ = 0;
-  num_edges_ = 0;
-  SetThreadCount(omp_get_max_threads());
-}
-
-void LadyBugBidirectionalCSR::Close() {
-  Sync(false);
-  fwd_offsets_.Close();
-  fwd_edges_.Close();
-  bwd_offsets_.Close();
-  bwd_edges_.Close();
-  for (auto &buf : thread_delta_buffers_) {
-    buf.clear();
-  }
-  num_nodes_ = 0;
-  num_edges_ = 0;
-}
-
-void LadyBugBidirectionalCSR::Sync(bool async) {
-  fwd_offsets_.Sync(async);
-  fwd_edges_.Sync(async);
-  bwd_offsets_.Sync(async);
-  bwd_edges_.Sync(async);
-}
-
-void LadyBugBidirectionalCSR::SetThreadCount(int num_threads) {
-  int count = std::max(1, num_threads);
-  thread_delta_buffers_.resize(count);
-  for (auto &buf : thread_delta_buffers_) {
-    buf.reserve(8192);
-  }
-}
-
-void LadyBugBidirectionalCSR::EnsureNodeCapacity(size_t node_count) {
-  size_t required_offsets = node_count + 1;
-  if (required_offsets > fwd_offsets_.capacity()) {
-    size_t new_cap = std::max(required_offsets, fwd_offsets_.capacity() * 2);
-    fwd_offsets_.Reserve(new_cap);
-    bwd_offsets_.Reserve(new_cap);
-  }
-}
-
-void LadyBugBidirectionalCSR::EnsureEdgeCapacity(size_t edge_count) {
-  if (edge_count > fwd_edges_.capacity()) {
-    size_t new_cap = std::max(edge_count, fwd_edges_.capacity() * 2);
-    fwd_edges_.Reserve(new_cap);
-    bwd_edges_.Reserve(new_cap);
-  }
-}
-
-void LadyBugBidirectionalCSR::AppendNodeOutEdges(int u, std::span<const int32_t> targets) {
-  size_t node_idx = static_cast<size_t>(u);
-  EnsureNodeCapacity(node_idx + 1);
-
-  // If there are skipped nodes between num_nodes_ and u, initialize their offsets
-  while (num_nodes_ <= node_idx) {
-    fwd_offsets_[num_nodes_] = fwd_edges_.size();
-    bwd_offsets_[num_nodes_] = bwd_edges_.size();
-    num_nodes_++;
-  }
-
-  // Append targets to forward edges
-  if (!targets.empty()) {
-    EnsureEdgeCapacity(fwd_edges_.size() + targets.size());
-    fwd_edges_.AppendSpan(targets);
-    num_edges_ += targets.size();
-  }
-
-  fwd_offsets_[node_idx + 1] = fwd_edges_.size();
-  bwd_offsets_[node_idx + 1] = bwd_edges_.size();
-  num_nodes_ = node_idx + 1;
-
-  fwd_offsets_.SetSize(num_nodes_ + 1);
-  bwd_offsets_.SetSize(num_nodes_ + 1);
-}
-
-void LadyBugBidirectionalCSR::RecordDeltaIncomingCitation(int thread_id, int32_t target_v, int32_t citing_u) {
-  if (thread_id < 0 || static_cast<size_t>(thread_id) >= thread_delta_buffers_.size()) {
-    std::lock_guard<std::mutex> lock(delta_mutex_);
-    if (thread_delta_buffers_.empty()) thread_delta_buffers_.resize(1);
-    thread_delta_buffers_[0].push_back({target_v, citing_u});
-    return;
-  }
-  thread_delta_buffers_[thread_id].push_back({target_v, citing_u});
-}
-
-void LadyBugBidirectionalCSR::RecordDeltaBatch(int thread_id,
-                                               std::span<const std::pair<int32_t, int32_t>> edges) {
-  if (thread_id < 0 || static_cast<size_t>(thread_id) >= thread_delta_buffers_.size()) {
-    std::lock_guard<std::mutex> lock(delta_mutex_);
-    if (thread_delta_buffers_.empty()) thread_delta_buffers_.resize(1);
-    for (const auto &e : edges) {
-      thread_delta_buffers_[0].push_back({e.second, e.first}); // e.second is target, e.first is citing
+  // Placement walks the edge list in order so rows keep input order; the two
+  // directions are filled concurrently.
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      Column<uint64_t> cursor;
+      cursor.ResizeUninitialized(num_nodes);
+      std::memcpy(cursor.data(), fwd_off, num_nodes * sizeof(uint64_t));
+      int32_t *targets = fwd_targets_.data();
+      for (size_t i = 0; i < m; ++i) {
+        targets[cursor[src[i]]++] = dst[i];
+      }
     }
-    return;
-  }
-  auto &buf = thread_delta_buffers_[thread_id];
-  for (const auto &e : edges) {
-    buf.push_back({e.second, e.first});
-  }
-}
-
-void LadyBugBidirectionalCSR::Restore(size_t node_count, size_t edge_count) {
-  num_nodes_ = node_count;
-  num_edges_ = edge_count;
-  fwd_offsets_.SetSize(num_nodes_ + 1);
-  bwd_offsets_.SetSize(num_nodes_ + 1);
-  fwd_edges_.SetSize(num_edges_);
-  bwd_edges_.SetSize(num_edges_);
-}
-
-void LadyBugBidirectionalCSR::SetNodeCount(size_t count) {
-  if (count <= num_nodes_) return;
-  EnsureNodeCapacity(count);
-  while (num_nodes_ < count) {
-    fwd_offsets_[num_nodes_] = fwd_edges_.size();
-    bwd_offsets_[num_nodes_] = bwd_edges_.size();
-    num_nodes_++;
-  }
-  fwd_offsets_[num_nodes_] = fwd_edges_.size();
-  bwd_offsets_[num_nodes_] = bwd_edges_.size();
-  fwd_offsets_.SetSize(num_nodes_ + 1);
-  bwd_offsets_.SetSize(num_nodes_ + 1);
-}
-
-void LadyBugBidirectionalCSR::MergeAnnualDeltaBuffer() {
-  // 1. Calculate total delta count and required node capacity
-  size_t total_deltas = 0;
-  size_t required_nodes = num_nodes_;
-  for (const auto &buf : thread_delta_buffers_) {
-    total_deltas += buf.size();
-    for (const auto &d : buf) {
-      if (d.target >= 0) {
-        required_nodes = std::max(required_nodes, static_cast<size_t>(d.target + 1));
+#pragma omp section
+    {
+      Column<uint64_t> cursor;
+      cursor.ResizeUninitialized(num_nodes);
+      std::memcpy(cursor.data(), bwd_off, num_nodes * sizeof(uint64_t));
+      int32_t *sources = bwd_sources_.data();
+      for (size_t i = 0; i < m; ++i) {
+        sources[cursor[dst[i]]++] = src[i];
       }
     }
   }
+}
 
-  if (total_deltas == 0) {
+void BidirectionalCSR::AppendRows(size_t count, std::span<const uint64_t> row_ptr,
+                                  std::span<const int32_t> targets) {
+  if (row_ptr.size() != count + 1) {
+    throw std::invalid_argument("BidirectionalCSR::AppendRows: row_ptr must have count + 1 entries");
+  }
+  const uint64_t base = fwd_targets_.size();
+  fwd_targets_.Append(targets);
+  fwd_offsets_.Reserve(fwd_offsets_.size() + count);
+  bwd_offsets_.Reserve(bwd_offsets_.size() + count);
+  const uint64_t bwd_end = bwd_offsets_.back();
+  for (size_t k = 1; k <= count; ++k) {
+    fwd_offsets_.PushBack(base + row_ptr[k]);
+    bwd_offsets_.PushBack(bwd_end);
+  }
+  num_nodes_ += count;
+}
+
+void BidirectionalCSR::MergeInEdges(std::span<const int32_t> sources,
+                                    std::span<const int32_t> targets) {
+  if (sources.size() != targets.size()) {
+    throw std::invalid_argument("BidirectionalCSR::MergeInEdges: size mismatch");
+  }
+  const size_t n = num_nodes_;
+  const size_t m = targets.size();
+  if (m == 0) {
     return;
   }
 
-  if (required_nodes > num_nodes_) {
-    SetNodeCount(required_nodes);
+  // 1. Count new in-edges per node.
+  Column<uint32_t> added;
+  added.Resize(n, 0);
+  uint32_t *added_ptr = added.data();
+#pragma omp parallel for schedule(static)
+  for (size_t i = 0; i < m; ++i) {
+    __atomic_fetch_add(&added_ptr[targets[i]], 1u, __ATOMIC_RELAXED);
   }
 
-  // 2. Count delta incoming edges per node v
-  std::vector<uint32_t> delta_in_degree(num_nodes_ + 1, 0);
-  for (const auto &buf : thread_delta_buffers_) {
-    for (const auto &d : buf) {
-      if (d.target >= 0 && static_cast<size_t>(d.target) < num_nodes_) {
-        delta_in_degree[d.target]++;
-      }
+  // 2. New offsets.
+  Column<uint64_t> new_offsets;
+  new_offsets.ResizeUninitialized(n + 1);
+  const uint64_t *old_off = bwd_offsets_.data();
+#pragma omp parallel for schedule(static)
+  for (size_t v = 0; v < n; ++v) {
+    new_offsets[v] = (old_off[v + 1] - old_off[v]) + added_ptr[v];
+  }
+  new_offsets[n] = 0;
+  ExclusiveScanInPlace(new_offsets.data(), n + 1);
+
+  // 3. Copy existing rows into the new layout (double buffer).
+  Column<int32_t> new_sources;
+  new_sources.ResizeUninitialized(bwd_sources_.size() + m);
+  const int32_t *old_src = bwd_sources_.data();
+  int32_t *dst_src = new_sources.data();
+#pragma omp parallel for schedule(dynamic, 4096)
+  for (size_t v = 0; v < n; ++v) {
+    uint64_t len = old_off[v + 1] - old_off[v];
+    if (len > 0) {
+      std::memcpy(dst_src + new_offsets[v], old_src + old_off[v], len * sizeof(int32_t));
     }
   }
 
-  // 3. Construct new Backward CSR layout
-  size_t new_total_bwd_edges = bwd_edges_.size() + total_deltas;
-  EnsureEdgeCapacity(new_total_bwd_edges);
-  EnsureNodeCapacity(num_nodes_);
-
-  // Compute new offsets and insertion write pointers
-  std::vector<uint64_t> new_bwd_offsets(num_nodes_ + 1, 0);
-  std::vector<uint64_t> write_pos(num_nodes_ + 1, 0);
-
-  uint64_t running_offset = 0;
-  for (size_t v = 0; v < num_nodes_; ++v) {
-    new_bwd_offsets[v] = running_offset;
-    write_pos[v] = running_offset;
-    size_t old_degree = bwd_offsets_[v + 1] - bwd_offsets_[v];
-    running_offset += old_degree + delta_in_degree[v];
+  // 4. Append the new in-edges after each row's existing entries, in input order.
+#pragma omp parallel for schedule(static)
+  for (size_t v = 0; v < n; ++v) {
+    added_ptr[v] = static_cast<uint32_t>(old_off[v + 1] - old_off[v]);
   }
-  new_bwd_offsets[num_nodes_] = running_offset;
-
-  // Allocate temporary buffer for merged bwd edges
-  std::vector<int32_t> merged_bwd_edges(running_offset);
-
-  // Copy existing historical in-edges into new layout
-#pragma omp parallel for schedule(dynamic, 1024)
-  for (size_t v = 0; v < num_nodes_; ++v) {
-    uint64_t old_start = bwd_offsets_[v];
-    uint64_t old_end = bwd_offsets_[v + 1];
-    uint64_t pos = write_pos[v];
-    for (uint64_t i = old_start; i < old_end; ++i) {
-      merged_bwd_edges[pos++] = bwd_edges_[i];
-    }
-    write_pos[v] = pos; // points to start of delta append region
+  for (size_t i = 0; i < m; ++i) {
+    int32_t v = targets[i];
+    dst_src[new_offsets[v] + added_ptr[v]++] = sources[i];
   }
 
-  // Append delta incoming edges to each node v
-  for (const auto &buf : thread_delta_buffers_) {
-    for (const auto &d : buf) {
-      if (d.target >= 0 && static_cast<size_t>(d.target) < num_nodes_) {
-        uint64_t pos = write_pos[d.target]++;
-        merged_bwd_edges[pos] = d.source;
-      }
-    }
-  }
-
-  // Copy back to memory-mapped bwd_edges_ and bwd_offsets_
-  bwd_edges_.SetSize(running_offset);
-  std::memcpy(bwd_edges_.data(), merged_bwd_edges.data(), running_offset * sizeof(int32_t));
-
-  bwd_offsets_.SetSize(num_nodes_ + 1);
-  std::memcpy(bwd_offsets_.data(), new_bwd_offsets.data(), (num_nodes_ + 1) * sizeof(uint64_t));
-
-  // Clear delta buffers
-  for (auto &buf : thread_delta_buffers_) {
-    buf.clear();
-  }
-
-  Sync(false);
+  bwd_sources_ = std::move(new_sources);
+  bwd_offsets_ = std::move(new_offsets);
 }
 
-void LadyBugBidirectionalCSR::IngestCSV(const std::string &edgelist_csv, size_t total_nodes) {
-  char delim = DetectDelimiter(edgelist_csv);
-  std::ifstream file(edgelist_csv);
-  if (!file.is_open()) {
-    throw std::runtime_error("LadyBugBidirectionalCSR::IngestCSV failed to open " + edgelist_csv);
+void BidirectionalCSR::SyncNodeCountFromColumns() {
+  if (fwd_offsets_.size() == 0 || bwd_offsets_.size() != fwd_offsets_.size()) {
+    throw std::runtime_error("BidirectionalCSR: inconsistent offset columns");
   }
-
-  std::string line;
-  if (!std::getline(file, line)) {
-    return;
-  }
-
-  struct EdgePair {
-    int32_t source;
-    int32_t target;
-  };
-
-  std::vector<EdgePair> edges;
-  edges.reserve(262144);
-
-  int max_node_id = static_cast<int>(total_nodes > 0 ? total_nodes - 1 : 0);
-
-  while (std::getline(file, line)) {
-    if (line.empty()) continue;
-    const char *p = line.c_str();
-    char *end = nullptr;
-    int32_t u = static_cast<int32_t>(std::strtol(p, &end, 10));
-    while (*end == delim || *end == ' ' || *end == '\t' || *end == '\r') {
-      end++;
-    }
-    int32_t v = static_cast<int32_t>(std::strtol(end, nullptr, 10));
-    edges.push_back({u, v});
-    max_node_id = std::max(max_node_id, std::max(u, v));
-  }
-
-  size_t n_nodes = std::max(total_nodes, static_cast<size_t>(max_node_id + 1));
-  size_t n_edges = edges.size();
-
-  EnsureNodeCapacity(n_nodes);
-  EnsureEdgeCapacity(n_edges);
-
-  // 1. Build Forward CSR
-  std::vector<uint32_t> out_degrees(n_nodes + 1, 0);
-  for (const auto &e : edges) {
-    if (e.source >= 0 && static_cast<size_t>(e.source) < n_nodes) {
-      out_degrees[e.source]++;
-    }
-  }
-
-  fwd_offsets_.SetSize(n_nodes + 1);
-  uint64_t fwd_running = 0;
-  std::vector<uint64_t> fwd_write_pos(n_nodes + 1, 0);
-  for (size_t u = 0; u < n_nodes; ++u) {
-    fwd_offsets_[u] = fwd_running;
-    fwd_write_pos[u] = fwd_running;
-    fwd_running += out_degrees[u];
-  }
-  fwd_offsets_[n_nodes] = fwd_running;
-
-  fwd_edges_.SetSize(fwd_running);
-  for (const auto &e : edges) {
-    if (e.source >= 0 && static_cast<size_t>(e.source) < n_nodes) {
-      uint64_t pos = fwd_write_pos[e.source]++;
-      fwd_edges_[pos] = e.target;
-    }
-  }
-
-  // 2. Build Backward CSR (CSC)
-  std::vector<uint32_t> in_degrees(n_nodes + 1, 0);
-  for (const auto &e : edges) {
-    if (e.target >= 0 && static_cast<size_t>(e.target) < n_nodes) {
-      in_degrees[e.target]++;
-    }
-  }
-
-  bwd_offsets_.SetSize(n_nodes + 1);
-  uint64_t bwd_running = 0;
-  std::vector<uint64_t> bwd_write_pos(n_nodes + 1, 0);
-  for (size_t v = 0; v < n_nodes; ++v) {
-    bwd_offsets_[v] = bwd_running;
-    bwd_write_pos[v] = bwd_running;
-    bwd_running += in_degrees[v];
-  }
-  bwd_offsets_[n_nodes] = bwd_running;
-
-  bwd_edges_.SetSize(bwd_running);
-  for (const auto &e : edges) {
-    if (e.target >= 0 && static_cast<size_t>(e.target) < n_nodes) {
-      uint64_t pos = bwd_write_pos[e.target]++;
-      bwd_edges_[pos] = e.source;
-    }
-  }
-
-  num_nodes_ = n_nodes;
-  num_edges_ = n_edges;
-
-  Sync(false);
-}
-
-void LadyBugBidirectionalCSR::BuildFromAdjLists(
-    size_t n_nodes, const std::vector<std::vector<int>> &fwd_adj,
-    const std::vector<std::vector<int>> &bwd_adj) {
-  uint64_t n_edges = 0;
-  for (size_t u = 0; u < fwd_adj.size() && u < n_nodes; ++u) {
-    n_edges += fwd_adj[u].size();
-  }
-
-  EnsureNodeCapacity(n_nodes);
-  EnsureEdgeCapacity(n_edges);
-
-  num_nodes_ = n_nodes;
-  num_edges_ = n_edges;
-
-  // 1. Build Forward CSR
-  fwd_offsets_.SetSize(n_nodes + 1);
-  uint64_t fwd_cur = 0;
-  for (size_t u = 0; u < n_nodes; ++u) {
-    fwd_offsets_[u] = fwd_cur;
-    if (u < fwd_adj.size()) {
-      fwd_cur += fwd_adj[u].size();
-    }
-  }
-  fwd_offsets_[n_nodes] = fwd_cur;
-
-  fwd_edges_.SetSize(fwd_cur);
-  for (size_t u = 0; u < fwd_adj.size() && u < n_nodes; ++u) {
-    uint64_t pos = fwd_offsets_[u];
-    for (size_t idx = 0; idx < fwd_adj[u].size(); ++idx) {
-      fwd_edges_[pos + idx] = fwd_adj[u][idx];
-    }
-  }
-
-  // 2. Build Backward CSR
-  bwd_offsets_.SetSize(n_nodes + 1);
-  uint64_t bwd_cur = 0;
-  for (size_t v = 0; v < n_nodes; ++v) {
-    bwd_offsets_[v] = bwd_cur;
-    if (v < bwd_adj.size()) {
-      bwd_cur += bwd_adj[v].size();
-    }
-  }
-  bwd_offsets_[n_nodes] = bwd_cur;
-
-  bwd_edges_.SetSize(bwd_cur);
-  for (size_t v = 0; v < bwd_adj.size() && v < n_nodes; ++v) {
-    uint64_t pos = bwd_offsets_[v];
-    for (size_t idx = 0; idx < bwd_adj[v].size(); ++idx) {
-      bwd_edges_[pos + idx] = bwd_adj[v][idx];
-    }
-  }
-
-  Sync(false);
-}
-
-void LadyBugBidirectionalCSR::ExportCSV(const std::string &output_csv) const {
-  std::ofstream out(output_csv);
-  if (!out.is_open()) {
-    throw std::runtime_error("LadyBugBidirectionalCSR::ExportCSV failed to open " + output_csv);
-  }
-
-  out << "source,target\n";
-  for (size_t u = 0; u < num_nodes_; ++u) {
-    uint64_t start = fwd_offsets_[u];
-    uint64_t end = fwd_offsets_[u + 1];
-    for (uint64_t i = start; i < end; ++i) {
-      out << u << "," << fwd_edges_[i] << "\n";
-    }
+  num_nodes_ = fwd_offsets_.size() - 1;
+  if (fwd_offsets_.back() != fwd_targets_.size() || bwd_offsets_.back() != bwd_sources_.size()) {
+    throw std::runtime_error("BidirectionalCSR: offsets do not match edge columns");
   }
 }
 

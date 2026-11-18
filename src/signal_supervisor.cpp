@@ -1,81 +1,63 @@
 #include "signal_supervisor.h"
-#include <algorithm>
-#include <iostream>
 
-namespace ladybug {
+#include <algorithm>
+#include <csignal>
+#include <cstdlib>
+#include <ctime>
 
 std::atomic<bool> SignalSupervisor::signal_caught_{false};
-std::chrono::time_point<std::chrono::steady_clock> SignalSupervisor::process_start_time_ =
-    std::chrono::steady_clock::now();
 
-SignalSupervisor::SignalSupervisor()
-    : limit_seconds_(0.0),
-      safety_margin_seconds_(1200.0),
-      last_cycle_duration_seconds_(0.0) {}
+namespace {
+const std::chrono::system_clock::time_point kProcessStart = std::chrono::system_clock::now();
 
-SignalSupervisor::~SignalSupervisor() {}
-
-void SignalSupervisor::RecordProcessStartTime() noexcept {
-  process_start_time_ = std::chrono::steady_clock::now();
+double NowEpoch() {
+  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-void SignalSupervisor::SignalHandler(int signum) {
+double ParseEpoch(const char *value) {
+  if (value == nullptr || *value == '\0') return 0;
+  char *end = nullptr;
+  double v = std::strtod(value, &end);
+  return (end != value && v > 0) ? v : 0;
+}
+} // namespace
+
+void SignalSupervisor::Handler(int) {
+  // Only an atomic store: async-signal-safe.
   signal_caught_.store(true, std::memory_order_relaxed);
-  std::cerr << "\n[SignalSupervisor] Caught termination signal (" << signum
-            << "). Requesting clean annual BSP flush before exit.\n" << std::endl;
 }
 
 void SignalSupervisor::Register() {
-  std::signal(SIGTERM, SignalHandler);
-  std::signal(SIGINT, SignalHandler);
-#if defined(SIGUSR1)
-  std::signal(SIGUSR1, SignalHandler);
+  std::signal(SIGTERM, Handler);
+  std::signal(SIGINT, Handler);
+#ifdef SIGUSR1
+  std::signal(SIGUSR1, Handler);
 #endif
 }
 
-void SignalSupervisor::SetWallClockLimit(double limit_seconds, double safety_margin_seconds) {
-  limit_seconds_ = limit_seconds;
+void SignalSupervisor::Configure(double wall_clock_limit_seconds, double safety_margin_seconds) {
   safety_margin_seconds_ = safety_margin_seconds;
-}
-
-void SignalSupervisor::RecordCycleDuration(double seconds) noexcept {
-  last_cycle_duration_seconds_ = seconds;
-}
-
-bool SignalSupervisor::IsSignalCaught() noexcept {
-  return signal_caught_.load(std::memory_order_relaxed);
-}
-
-void SignalSupervisor::ResetSignal() noexcept {
-  signal_caught_.store(false, std::memory_order_relaxed);
-}
-
-double SignalSupervisor::GetElapsedSeconds() const noexcept {
-  auto now = std::chrono::steady_clock::now();
-  return std::chrono::duration<double>(now - process_start_time_).count();
-}
-
-double SignalSupervisor::GetRemainingSeconds() const noexcept {
-  if (limit_seconds_ <= 0.0) {
-    return 1e9; // Unlimited
+  if (double v = ParseEpoch(std::getenv("CANTATAS_DEADLINE_EPOCH")); v > 0) {
+    deadline_epoch_ = v;
+    deadline_source_ = "CANTATAS_DEADLINE_EPOCH";
+  } else if (double s = ParseEpoch(std::getenv("SLURM_JOB_END_TIME")); s > 0) {
+    deadline_epoch_ = s;
+    deadline_source_ = "SLURM_JOB_END_TIME";
+  } else if (wall_clock_limit_seconds > 0) {
+    deadline_epoch_ =
+        std::chrono::duration<double>(kProcessStart.time_since_epoch()).count() + wall_clock_limit_seconds;
+    deadline_source_ = "wall_clock_limit";
   }
-  double elapsed = GetElapsedSeconds();
-  return std::max(0.0, limit_seconds_ - elapsed);
 }
 
-bool SignalSupervisor::ShouldStop() const {
-  if (IsSignalCaught()) {
-    return true;
-  }
-  if (limit_seconds_ > 0.0) {
-    double remaining = GetRemainingSeconds();
-    double required_buffer =
-        std::max(safety_margin_seconds_, last_cycle_duration_seconds_ * 1.3);
-    if (remaining <= required_buffer) {
-      return true;
-    }
-  }
-  return false;
+double SignalSupervisor::SecondsRemaining() const {
+  if (deadline_epoch_ <= 0) return 1e18;
+  return deadline_epoch_ - NowEpoch();
 }
 
-} // namespace ladybug
+bool SignalSupervisor::ShouldStop(double save_seconds) const {
+  if (SignalCaught()) return true;
+  if (deadline_epoch_ <= 0) return false;
+  double needed = std::max(safety_margin_seconds_, 1.3 * last_cycle_seconds_) + save_seconds;
+  return SecondsRemaining() <= needed;
+}
